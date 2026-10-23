@@ -40,8 +40,8 @@ $M -C <repo> -base <base> -format json -o $OUT/map.json
 $M -from $OUT/map.json -format outline -o $OUT/outline.txt
 ```
 
-(To work on map-pr itself, build a checkout instead:
-`GOTOOLCHAIN=$GOV+auto go build -o $OUT/bin/map-pr <checkout>`.)
+(To work on map-pr itself, or before it is on a module proxy, build a checkout
+instead: `GOTOOLCHAIN=$GOV+auto go -C <checkout> build -o $OUT/bin/map-pr .`)
 
 Look at stderr: type errors mean the toolchain or modules are wrong. Fix them
 before you go on; a map built on broken types misses callers.
