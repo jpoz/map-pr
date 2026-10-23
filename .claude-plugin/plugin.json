@@ -1,0 +1,9 @@
+{
+  "name": "map-pr",
+  "version": "0.1.0",
+  "description": "An interactive, zoomable map of a Go pull request: the changed declarations, the code that uses them, the entry points that reach them, and a guided tour that Claude writes.",
+  "author": { "name": "James Pozdena" },
+  "homepage": "https://github.com/jpoz/map-pr",
+  "repository": "https://github.com/jpoz/map-pr",
+  "keywords": ["go", "pull-request", "code-review", "visualization"]
+}

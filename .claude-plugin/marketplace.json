@@ -1,0 +1,12 @@
+{
+  "name": "map-pr",
+  "description": "The map-pr plugin: an interactive map of a Go pull request.",
+  "owner": { "name": "James Pozdena" },
+  "plugins": [
+    {
+      "name": "map-pr",
+      "source": "./",
+      "description": "An interactive, zoomable map of a Go pull request, with a tour and notes that Claude writes."
+    }
+  ]
+}

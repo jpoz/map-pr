@@ -2,7 +2,7 @@
 // answers to them, in a JSON file next to the page.
 //
 // The page writes through the HTTP handler; the answering side writes with
-// the mapr CLI. Both read and write the file under an exclusive file lock, so
+// the map-pr CLI. Both read and write the file under an exclusive file lock, so
 // neither loses the other's change.
 package comments
 

@@ -127,7 +127,7 @@ func replyComment(args []string) error {
 	id := fs.String("id", "", "thread ID")
 	resolve := fs.Bool("resolve", false, "also mark the thread as done")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: mapr reply -dir DIR -id ID [-resolve] TEXT | -")
+		fmt.Fprintln(fs.Output(), "usage: map-pr reply -dir DIR -id ID [-resolve] TEXT | -")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)

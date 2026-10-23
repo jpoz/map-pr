@@ -433,7 +433,7 @@ function ZoomMap(canvas, opts) {
       try {
         tokens.set(c.id, await opts.tokenize(c.node, c.lines.join("\n")));
       } catch (err) {
-        console.warn("mapr: syntax colors unavailable", err);
+        console.warn("map-pr: syntax colors unavailable", err);
         tokenQueue.length = 0;
         break;
       }

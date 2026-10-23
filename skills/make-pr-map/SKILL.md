@@ -6,35 +6,42 @@ argument-hint: "[PR URL | owner/repo#N | N | empty for current branch]"
 
 # make-pr-map
 
-`mapr` (in `/Users/jpoz/Developer/jpoz/hack/mapr`) finds the changed Go
-declarations and their users with type information. You add the meaning: themes, a tour and
-notes. mapr puts both on one HTML page.
+`map-pr` (github.com/jpoz/map-pr) finds the changed Go declarations and their
+users with type information. You add the meaning: themes, a tour and notes.
+map-pr puts both on one HTML page.
 
-Work in `~/.cache/mapr/<repo>-<pr>/` (call it `$OUT`). Keep private code on this
-machine: never publish the page or the notes anywhere unless the user asks.
+Needs: Go, git, and `gh` (logged in) for PRs on GitHub.
+
+Work in `~/.cache/map-pr/<repo>-<pr>/` (call it `$OUT`). Keep private code on
+this machine: never publish the page or the notes anywhere unless the user asks.
 
 ## 1. Get the code at the PR head
 
 - **PR URL, `owner/repo#N`, or `N`:** read the PR:
   `gh pr view <N> -R <owner/repo> --json title,body,baseRefOid,headRefOid,files`.
-  Clone once to `~/.cache/mapr/repos/<owner>/<repo>`
+  Clone once to `~/.cache/map-pr/repos/<owner>/<repo>`
   (`gh repo clone <owner/repo> <dir> -- --filter=blob:none`), then
   `git fetch origin pull/<N>/head:pr-<N> && git checkout pr-<N>`.
   The base is `baseRefOid`.
 - **No argument:** use the current repo and branch. The base is the default
   branch (`gh repo view --json defaultBranchRef`), or what the user names.
 
-## 2. Run mapr with the repo's Go toolchain
+## 2. Install map-pr with the repo's Go toolchain, and run it
 
-mapr type-checks with the `go/types` of the Go that builds it, so build it with
-the toolchain the repo asks for:
+map-pr type-checks with the `go/types` of the Go that builds it, so build it
+with the toolchain the repo asks for. `+auto` lets Go pick a newer toolchain
+when map-pr itself needs one. Install it per map, in `$OUT/bin`:
 
 ```sh
 GOV=$(go -C <repo> env GOVERSION)
-cd /Users/jpoz/Developer/jpoz/hack/mapr
-GOTOOLCHAIN=$GOV go run . -C <repo> -base <base> -format json -o $OUT/map.json
-go run . -from $OUT/map.json -format outline -o $OUT/outline.txt
+GOBIN=$OUT/bin GOTOOLCHAIN=$GOV+auto go install github.com/jpoz/map-pr@latest
+M=$OUT/bin/map-pr
+$M -C <repo> -base <base> -format json -o $OUT/map.json
+$M -from $OUT/map.json -format outline -o $OUT/outline.txt
 ```
+
+(To work on map-pr itself, or before it is on a module proxy, build a checkout
+instead: `GOTOOLCHAIN=$GOV+auto go -C <checkout> build -o $OUT/bin/map-pr .`)
 
 Look at stderr: type errors mean the toolchain or modules are wrong. Fix them
 before you go on; a map built on broken types misses callers.
@@ -63,7 +70,7 @@ yet; say which.
 Look especially for:
 - **Behavior changes** vs renames and refactors (say which).
 - **Removed safety:** deleted checks, gates, approvals, locks.
-- **Deleted code** — mapr does not show deleted declarations yet, so name them
+- **Deleted code** — map-pr does not show deleted declarations yet, so name them
   in the tour text.
 - **Entry points** a user or other service reaches: routes, CLI commands, tool
   definitions, workers. Exported functions may have callers outside the repo.
@@ -120,16 +127,14 @@ Rules:
 ## 5. Build the page and check it
 
 ```sh
-cd /Users/jpoz/Developer/jpoz/hack/mapr
-go run . -from $OUT/map.json -notes $OUT/notes.json -o $OUT/pr-map.html
+$M -from $OUT/map.json -notes $OUT/notes.json -o $OUT/pr-map.html
 ```
 
-mapr refuses notes that name a key or theme that is not on the map and lists
+map-pr refuses notes that name a key or theme that is not on the map and lists
 each problem. Fix `notes.json` and run it again until it passes.
 
-If browser tools are available, look at the page: serve `$OUT` with
-`python3 -m http.server <port> --bind 127.0.0.1` (the browser tool cannot open
-`file://`) and step through the tour. A step whose declarations sit in
+If browser tools are available, look at the page through the server from
+step 6 (a browser tool may refuse `file://`) and step through the tour. A step whose declarations sit in
 packages far apart opens at the package level with labeled pins; one in a
 single package opens at the declaration level. Prefer steps of the second
 kind: pick declarations that call each other.
@@ -139,16 +144,17 @@ kind: pick declarations that call each other.
 Serve the page so the reader can drop questions on it, and watch for them:
 
 ```sh
-go build -o $OUT/mapr /Users/jpoz/Developer/jpoz/hack/mapr
-$OUT/mapr serve -dir $OUT -addr 127.0.0.1:8770    # run in the background
-$OUT/mapr comments -dir $OUT -watch               # run with the Monitor tool
+$M serve -dir $OUT -addr 127.0.0.1:8770    # run in the background
+$M comments -dir $OUT -watch               # watch it, e.g. with the Monitor tool
 ```
+
+If port 8770 is taken, pick another and use it in the URL below.
 
 Each line from `-watch` is a new question: `[ID] <node key> line N: <text>`.
 For each one:
-1. Run `$OUT/mapr comments -dir $OUT` to see the whole thread.
+1. Run `$M comments -dir $OUT` to see the whole thread.
 2. Read the code at that place in the repo (and the diff), not only the map.
-3. Answer with `$OUT/mapr reply -dir $OUT -id ID -` and the text on stdin.
+3. Answer with `$M reply -dir $OUT -id ID -` and the text on stdin.
    Same Markdown as the notes, plus line breaks. Say what you checked; say
    when something is a guess. Use `-resolve` only when the reader asks.
 

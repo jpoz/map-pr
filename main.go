@@ -1,6 +1,6 @@
-// Command mapr draws a map of a PR: the Go functions it changes and the code that uses them.
+// Command map-pr draws a map of a PR: the Go functions it changes and the code that uses them.
 //
-// mapr serve, mapr comments and mapr reply serve a map with questions a
+// map-pr serve, map-pr comments and map-pr reply serve a map with questions a
 // reader drops on it, list those questions, and answer them.
 package main
 
@@ -21,7 +21,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "mapr:", err)
+		fmt.Fprintln(os.Stderr, "map-pr:", err)
 		os.Exit(1)
 	}
 }
@@ -62,7 +62,7 @@ func run() error {
 		}
 		if problems := n.Check(m); len(problems) > 0 {
 			for _, p := range problems {
-				fmt.Fprintln(os.Stderr, "mapr: notes:", p)
+				fmt.Fprintln(os.Stderr, "map-pr: notes:", p)
 			}
 			return fmt.Errorf("%d problems in %s", len(problems), *notesPath)
 		}
