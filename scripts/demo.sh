@@ -3,7 +3,7 @@
 # Usage: scripts/demo.sh [dir]
 set -euo pipefail
 
-mapr_dir="$(cd "$(dirname "$0")/.." && pwd)"
+repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 dir="${1:-$(mktemp -d)/demo}"
 rm -rf "$dir"
 mkdir -p "$dir/auth" "$dir/server" "$dir/cmd/app"
@@ -153,6 +153,6 @@ func Refresh(token string) (*User, error) {
 }
 EOF
 
-(cd "$mapr_dir" && go run . -C "$dir" -base main -depth 3 -o "$dir/pr-map.html")
+(cd "$repo_dir" && go run . -C "$dir" -base main -depth 3 -o "$dir/pr-map.html")
 echo "demo repo: $dir"
 echo "map:       $dir/pr-map.html"

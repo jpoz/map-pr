@@ -186,7 +186,7 @@ function nodeList(keys) {
 
 const PATCHES = DATA.patches || {};
 const deletedFiles = new Set(DATA.deleted || []);
-// Line counts per file. A map saved before mapr kept them counts the patches.
+// Line counts per file. A map saved before map-pr kept them counts the patches.
 const STATS = DATA.stats || Object.fromEntries(Object.entries(PATCHES).map(([f, patch]) => {
   const lines = patch.split("\n");
   return [f, { added: lines.filter(l => l.startsWith("+")).length, deleted: lines.filter(l => l.startsWith("-")).length }];
@@ -234,7 +234,7 @@ async function highlightFile(details) {
     }).render({ fileDiff, containerWrapper: target });
     view.replaceChildren(target);
   } catch (err) {
-    console.warn("mapr: syntax-highlighted diff unavailable, showing plain diff", err);
+    console.warn("map-pr: syntax-highlighted diff unavailable, showing plain diff", err);
   }
 }
 
@@ -311,7 +311,7 @@ async function highlightCode(pre) {
     });
     linkRefs(pre);
   } catch (err) {
-    console.warn("mapr: syntax-highlighted source unavailable, showing plain source", err);
+    console.warn("map-pr: syntax-highlighted source unavailable, showing plain source", err);
   }
 }
 
@@ -593,8 +593,8 @@ function showSummary() {
 
 // ---------- comments ----------
 
-// When `mapr serve` serves the page, a reader can drop questions anywhere on
-// the map and Claude answers them with `mapr reply`. The threads live in
+// When `map-pr serve` serves the page, a reader can drop questions anywhere on
+// the map and Claude answers them with `map-pr reply`. The threads live in
 // comments.json next to the page. Opened as a file, the page has no comments.
 const comments = { on: false, threads: [], sig: "" };
 let commentMode = false;

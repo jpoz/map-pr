@@ -1,11 +1,38 @@
-# mapr
+# map-pr
 
-Draws a PR as a map: the Go declarations the branch changes (functions,
-methods, types, constants, variables), and the code that uses them.
+Draws a Go pull request as a map you zoom through: the declarations the branch
+changes (functions, methods, types, constants, variables), the code that uses
+them, and the entry points that reach them. With the `/make-pr-map` skill,
+Claude adds themes, a guided tour and notes, and answers questions you drop on
+the map.
+
+## Install
+
+**The Claude Code skill.** In Claude Code:
+
+```
+/plugin marketplace add jpoz/map-pr
+/plugin install map-pr@map-pr
+```
+
+Then ask for a map: `/make-pr-map https://github.com/owner/repo/pull/123`, a PR
+number in the current repo, or nothing for the current branch. (If another
+command already uses the name, the skill is `/map-pr:make-pr-map`.) To install
+only the skill, copy `skills/make-pr-map/` to `~/.claude/skills/`.
+
+The skill needs Go, git and the GitHub CLI (`gh`, logged in). It installs the
+`map-pr` command itself, built with the Go version of the repository it maps,
+and keeps each map in `~/.cache/map-pr/`.
+
+**The command alone.**
 
 ```sh
-go run . -C path/to/repo -base main -depth 2 -open
+go install github.com/jpoz/map-pr@latest
+map-pr -C path/to/repo -base main -depth 2 -open
 ```
+
+map-pr type-checks with the Go that builds it. For a repository that needs a
+newer Go, build it with that Go: `GOTOOLCHAIN=go1.N.M+auto go install ...`.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -52,7 +79,7 @@ most 10 users; the panel says how many more there are.
 An entry point is where execution starts: an HTTP handler (with its route, when
 the code registers it next to a route string such as
 `mux.HandleFunc("POST /x", h)`), `main`, a function started with `go`, or code
-with no callers outside tests (usually called through an interface). mapr walks
+with no callers outside tests (usually called through an interface). map-pr walks
 up from each declaration on the map to the nearest entry points, through up to
 8 calls that are not on the map. It keeps the fewest entry points that reach
 every change, and adds those to the map with a dashed edge; the panel shows the
@@ -68,15 +95,15 @@ entry point that a real request reaches.
 `-notes notes.json` adds an explanation on top of the map: a summary, themes
 (click one to light up its declarations), a guided tour (arrow keys step through
 it), and a note on any declaration. Notes refer to declarations by the keys that
-`-format outline` prints. mapr refuses notes that name a key that is not on the
-map. The `/make-pr-map` skill in `.claude/skills/` has Claude write them.
+`-format outline` prints. map-pr refuses notes that name a key that is not on the
+map. The `/make-pr-map` skill (`skills/make-pr-map/`) has Claude write them.
 
 Try it: `scripts/demo.sh` makes a repo that changes `authGoogle` and maps it.
 
 ## Questions on the map
 
 ```sh
-go run . serve -dir path/to/map-dir -open   # serves pr-map.html on 127.0.0.1:8770
+map-pr serve -dir path/to/map-dir -open   # serves pr-map.html on 127.0.0.1:8770
 ```
 
 Served this way, the page has a **Comment** button (or press `C`): click
@@ -91,9 +118,9 @@ machine: the server listens on loopback only, refuses other hosts, and accepts
 only JSON posts. Answer from the terminal:
 
 ```sh
-go run . comments -dir DIR          # open questions, with their place on the map
-go run . comments -dir DIR -watch   # one line per new question, until stopped
-go run . reply -dir DIR -id ID "text"   # or "-" to read the answer from stdin
+map-pr comments -dir DIR          # open questions, with their place on the map
+map-pr comments -dir DIR -watch   # one line per new question, until stopped
+map-pr reply -dir DIR -id ID "text"   # or "-" to read the answer from stdin
 ```
 
 Opened as a file, the page has no comments.
