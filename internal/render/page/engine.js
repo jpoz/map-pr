@@ -11,7 +11,7 @@ function ZoomMap(canvas, opts) {
 
   // World sizes. One world unit is one screen pixel at zoom 1.
   const S = {
-    nameFont: 13, metaFont: 9.5, header: 42, radius: 9,
+    nameFont: 13, metaFont: 9.5, header: 42, radius: 0,
     codeFont: 4.2, codeLine: 5.8, bodyPad: 6, maxLines: 140, maxCols: 110,
     cardMinW: 250, cardMaxW: 460,
     gap: 28, sectionGap: 40, sectionLabel: 30, pkgPad: 36, pkgHeader: 78, pkgRadius: 22,
@@ -58,7 +58,7 @@ function ZoomMap(canvas, opts) {
       bg: v("--bg"), panel: v("--panel"), ink: v("--ink"), muted: v("--muted"), line: v("--line"),
       pkgBg: v("--pkg-bg"), codeBg: v("--code-bg"), hl: v("--hl"), grid: v("--grid"),
       added: v("--added"), addedBg: v("--added-bg"), modified: v("--modified"), modifiedBg: v("--modified-bg"),
-      caller: v("--caller"), callerBg: v("--caller-bg"), note: v("--note-line"), removed: v("--removed"),
+      caller: v("--caller"), callerBg: v("--caller-bg"), note: v("--note-line"), removed: v("--removed"), removedBg: v("--removed-bg"),
       entry: v("--entry"), entryBg: v("--entry-bg"),
     };
   }
@@ -70,9 +70,21 @@ function ZoomMap(canvas, opts) {
 
   // ---------- layout ----------
 
+  // rowsOf lists the rows a card shows: its source lines, with the lines the
+  // change deleted before the line they came before, as a diff shows them.
+  // no holds each row's line number, 0 on a deleted row.
+  function rowsOf(n) {
+    const lines = (n.source || "").replace(/\t/g, "    ").split("\n");
+    const removed = n.removed || {}, text = [], no = [];
+    const del = l => { for (const t of removed[l] || []) { text.push(t.replace(/\t/g, "    ")); no.push(0); } };
+    lines.forEach((t, i) => { del(n.line + i); text.push(t); no.push(n.line + i); });
+    del(n.line + lines.length);
+    return { text, no };
+  }
+
   // wantWidth is the width a card needs for its name and code.
   function wantWidth(n) {
-    const lines = (n.source || "").replace(/\t/g, "    ").split("\n");
+    const lines = rowsOf(n).text;
     const cols = clamp(Math.max(...lines.map(l => l.trimEnd().length)), 24, S.maxCols);
     const gutterCols = String(n.line + lines.length).length + 2;
     const tag = (n.kind || "func").length * 10 * CH + 12;
@@ -85,13 +97,66 @@ function ZoomMap(canvas, opts) {
   // measure sizes a card of width w so its whole declaration fits: long or
   // wide code gets a smaller font, so it needs a deeper zoom to read.
   function measure(n, w) {
-    const lines = (n.source || "").replace(/\t/g, "    ").split("\n");
+    const { text: lines, no } = rowsOf(n);
     const cols = clamp(Math.max(...lines.map(l => l.trimEnd().length)), 24, S.maxCols);
     const gutterCols = String(n.line + lines.length).length + 2;
     const shown = Math.min(lines.length, S.maxLines);
     const font = Math.min(S.codeFont * shown / lines.length, (w - S.bodyPad * 2 - 4) / ((cols + gutterCols) * CH));
     const lh = font * S.codeLine / S.codeFont;
-    return { w, h: S.header + lines.length * lh + S.bodyPad * 2, lines, font, lh, gutter: gutterCols * font * CH };
+    const rowOf = new Map(no.flatMap((l, i) => l ? [[l, i]] : []));
+    return {
+      w, h: S.header + lines.length * lh + S.bodyPad * 2, lines, rowNo: no, rowOf,
+      refs: refSpans(n, lines, rowOf), locals: localSpans(n, rowOf), font, lh, gutter: gutterCols * font * CH,
+      textCols: Math.max(...lines.map(l => l.trimEnd().length)),
+    };
+  }
+
+  // localSpans places the uses of each local name on the card's rows, so
+  // hovering one marks the others. It maps a row to its spans of columns;
+  // g numbers the local.
+  function localSpans(n, rowOf) {
+    const out = new Map();
+    const raw = (n.source || "").split("\n");
+    (n.locals || []).forEach((group, g) => {
+      for (const [line, col, len] of group) {
+        const i = rowOf.get(line), text = raw[line - n.line];
+        if (i === undefined || text === undefined) continue;
+        const c0 = displayCol(text, col - 1), c1 = displayCol(text, col - 1 + len);
+        if (!out.has(i)) out.set(i, []);
+        out.get(i).push({ c0, c1, g });
+      }
+    });
+    return out;
+  }
+
+  // displayCol turns a byte offset in a source line into the column the card
+  // draws it at: a tab is four columns, as the card shows it.
+  function displayCol(text, bytes) {
+    let b = 0, col = 0;
+    for (const ch of text) {
+      if (b >= bytes) break;
+      const cp = ch.codePointAt(0);
+      b += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+      col += ch === "\t" ? 4 : ch.length;
+    }
+    return col;
+  }
+
+  // refSpans finds, on each row, the names that refer to another
+  // declaration, so a reader can click one to go to it. It maps a row to
+  // its spans of columns.
+  function refSpans(n, lines, rowOf) {
+    const out = new Map();
+    for (const r of opts.refsOf?.(n.id) || []) {
+      const re = new RegExp(`(?<![\\w$])${r.name.replace(/[$]/g, "\\$&")}(?![\\w$])`, "g");
+      for (const l of r.lines) {
+        const i = rowOf.get(l);
+        if (i === undefined) continue;
+        if (!out.has(i)) out.set(i, []);
+        for (const m of lines[i].matchAll(re)) out.get(i).push({ c0: m.index, c1: m.index + r.name.length, to: r.to });
+      }
+    }
+    return out;
   }
 
   // masonry places cards of one width in columns, each card in the column
@@ -519,6 +584,7 @@ function ZoomMap(canvas, opts) {
     drawGrid();
 
     const view = viewRect(40 / cam.z);
+    arrows = [];
     let open = 0;
     for (const p of pkgs.values()) {
       p.t = openness(p);
@@ -532,6 +598,7 @@ function ZoomMap(canvas, opts) {
       drawEdges(view);
       for (const c of leaving) if (overlaps(c, view)) drawCard(c, openOf(c), 1 - (c.fadeOut = Math.max(0, (c.fadeOut ?? 1) - 0.08)));
       for (const c of cards.values()) if (overlaps(c, view)) drawCard(c, openOf(c), c.fade);
+      drawArrows();
     }
     for (const p of pkgs.values()) if (overlaps(p, view)) drawSummary(p, p.t);
     drawPackageEdges((A, B) => 1 - Math.max(A.t, B.t));
@@ -791,7 +858,14 @@ function ZoomMap(canvas, opts) {
   }
 
   const codeAlpha = c => smooth(CODE_PX[0], CODE_PX[1], c.font * cam.z);
-  const lineY = (c, line) => c.y + S.header + S.bodyPad + (line - c.node.line + 0.5) * c.lh;
+  // A card whose code is wider than the card scrolls sideways. maxScroll is
+  // how far, in world units; scrollOf is where it is now.
+  const codeLeft = c => c.x + S.bodyPad + 4 + c.gutter;
+  const maxScroll = c => Math.max(0, (c.textCols + 1) * c.font * CH - (c.x + c.w - S.bodyPad - codeLeft(c)));
+  const scrollOf = c => clamp(c.scroll || 0, 0, maxScroll(c));
+  // rowOf is the row of a card that shows a source line.
+  const rowOf = (c, line) => c.rowOf.get(line) ?? clamp(line - c.node.line, 0, c.lines.length - 1);
+  const lineY = (c, line) => c.y + S.header + S.bodyPad + (rowOf(c, line) + 0.5) * c.lh;
 
   // edgePath runs from the user to the declaration it uses. When the user's
   // code is readable, the edge starts at the line that makes the call.
@@ -820,9 +894,28 @@ function ZoomMap(canvas, opts) {
     return [p0, c1, c2, p3];
   }
 
+  // arrows holds the head of each edge drawn this frame. The heads are drawn
+  // after the cards, so a card never covers one, and a reader can point at
+  // one to see every edge that arrives there.
+  let arrows = [];
+  // arrowPx is an arrow head's size on screen: base when zoomed out, growing
+  // with the zoom up to a limit, so it stays easy to see and to hit.
+  const arrowPx = base => Math.min(base * (1 + 0.9 * Math.log2(Math.max(cam.z, 1))), 26);
+  function drawArrows() {
+    for (const a of arrows) {
+      ctx.globalAlpha = a.alpha;
+      ctx.fillStyle = a.color;
+      arrow(a.from, a.p, a.px / cam.z);
+    }
+    ctx.globalAlpha = 1;
+  }
+  // hoverPort holds the edges that end where the pointer is.
+  let hoverPort = null;
+
   function drawEdges(view) {
     const z = cam.z;
     const hot = selected || hover;
+    const portSet = hoverPort ? new Set(hoverPort.edges) : null;
     const focusSet = focus && focus.ids ? new Set(focus.ids) : null;
     const later = [];
     for (const e of edges) {
@@ -830,7 +923,7 @@ function ZoomMap(canvas, opts) {
       if (!overlaps(box, view)) continue;
       const t1 = Math.min(openOf(e.a), openOf(e.b));
       if (t1 < 0.01) continue;
-      const isHot = hot && (e.from === hot || e.to === hot);
+      const isHot = hot && (e.from === hot || e.to === hot) || portSet && portSet.has(e);
       const isFocus = focusSet && focusSet.has(e.from) && focusSet.has(e.to);
       if (isHot || isFocus) { later.push([e, isHot, t1]); continue; }
       // Edges to other packages show as package edges until zoomed in; at
@@ -847,7 +940,7 @@ function ZoomMap(canvas, opts) {
       ctx.lineWidth = 1.2 / z;
       const [p0, c1, c2, p3] = edgePath(e);
       curve(p0, c1, c2, p3);
-      arrow(c2, p3, 7 / z);
+      arrows.push({ e, p: p3, from: c2, px: arrowPx(7), color: C.muted, alpha: ctx.globalAlpha });
     }
     for (const [e, isHot, t1] of later) {
       ctx.setLineDash(e.via ? [8 / z, 6 / z] : []);
@@ -858,7 +951,7 @@ function ZoomMap(canvas, opts) {
       ctx.lineWidth = 2.2 / z;
       const [p0, c1, c2, p3] = edgePath(e);
       curve(p0, c1, c2, p3);
-      arrow(c2, p3, 9 / z);
+      arrows.push({ e, p: p3, from: c2, px: arrowPx(9), color, alpha: ctx.globalAlpha });
     }
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
@@ -929,7 +1022,7 @@ function ZoomMap(canvas, opts) {
     ctx.textBaseline = "middle";
     ctx.fillStyle = C.ink;
     const x = sx(c.x) + Math.max(5 * z, 2) + 4, maxW = c.w * z - (x - sx(c.x)) - 4;
-    let text = c.node.name;
+    let text = (c.node.top ? "★ " : "") + c.node.name;
     const w = ctx.measureText(text).width;
     if (w > maxW) text = ellipsize(text, Math.floor(text.length * maxW / w));
     ctx.fillText(text, x, sy(c.y) + Math.max(S.header * z / 2, 7));
@@ -947,6 +1040,13 @@ function ZoomMap(canvas, opts) {
     const kind = (n.kind || "func").toUpperCase();
     ctx.fillText(kind, x, 19);
     x += ctx.measureText(kind).width + 8;
+    // A star marks the highest changed function: start reading here.
+    if (n.top) {
+      ctx.font = `${S.nameFont}px ${SANS}`;
+      ctx.fillStyle = statusColor(n.status);
+      ctx.fillText("★", x, 20);
+      x += ctx.measureText("★").width + 6;
+    }
     // Right side: tests, exported, note.
     let rx = right;
     ctx.textAlign = "right";
@@ -998,7 +1098,11 @@ function ZoomMap(canvas, opts) {
     ctx.fillStyle = C.muted;
     // A handler shows its route, the first thing a reviewer looks for.
     const route = n.entry && n.entry.routes && n.entry.routes[0];
-    const loc = (route ? route + "  ·  " : "") + `${n.file.split("/").pop()}:${n.line}`;
+    // A long path loses its start, not its end, so the file name stays.
+    const prefix = route ? route + "  ·  " : "";
+    const pos = `${n.file}:${n.line}`;
+    const room = Math.floor((right - 18) / (S.metaFont * CH)) - prefix.length;
+    const loc = room > 1 && pos.length > room ? prefix + "…" + pos.slice(pos.length - room + 1) : prefix + pos;
     ctx.fillText(ellipsize(loc, Math.floor((right - 18) / (S.metaFont * CH))), 18, 34);
   }
 
@@ -1013,13 +1117,19 @@ function ZoomMap(canvas, opts) {
     ctx.globalAlpha = a;
     if (changed.length) {
       ctx.fillStyle = C.addedBg;
-      for (const l of changed) ctx.fillRect(x0, top + (l - n.line) * lh, w0, lh + 0.01);
+      for (const l of changed) ctx.fillRect(x0, top + rowOf(c, l) * lh, w0, lh + 0.01);
       ctx.fillStyle = C.added;
-      for (const l of changed) ctx.fillRect(x0, top + (l - n.line) * lh, 2, lh + 0.01);
+      for (const l of changed) ctx.fillRect(x0, top + rowOf(c, l) * lh, 2, lh + 0.01);
+    }
+    if (n.removed) {
+      ctx.fillStyle = C.removedBg;
+      c.rowNo.forEach((l, i) => { if (!l) ctx.fillRect(x0, top + i * lh, w0, lh + 0.01); });
+      ctx.fillStyle = C.removed;
+      c.rowNo.forEach((l, i) => { if (!l) ctx.fillRect(x0, top + i * lh, 2, lh + 0.01); });
     }
     if (c.callLines) {
       ctx.fillStyle = C.hl;
-      for (const l of c.callLines) ctx.fillRect(x0 + 2, top + (l - n.line) * lh, w0 - 2, lh + 0.01);
+      for (const l of c.callLines) ctx.fillRect(x0 + 2, top + rowOf(c, l) * lh, w0 - 2, lh + 0.01);
     }
     const px = c.font * z;
     if (px < 0.5 || c.h * z < 24) return;
@@ -1047,8 +1157,35 @@ function ZoomMap(canvas, opts) {
       const first = Math.max(0, Math.floor((view.y - top) / lh)), last = Math.min(c.lines.length, Math.ceil((view.y + view.h - top) / lh));
       ctx.fillStyle = C.muted;
       ctx.textAlign = "right";
-      for (let i = first; i < last; i++) ctx.fillText(String(n.line + i), left - cw, top + (i + 0.5) * lh);
+      for (let i = first; i < last; i++) {
+        ctx.fillStyle = c.rowNo[i] ? C.muted : C.removed;
+        ctx.fillText(c.rowNo[i] ? String(c.rowNo[i]) : "−", left - cw, top + (i + 0.5) * lh);
+      }
       ctx.textAlign = "left";
+      // The code scrolls sideways under the line numbers, which stay put.
+      const scroll = scrollOf(c), ox = left - scroll;
+      if (scroll > 0) {
+        ctx.beginPath();
+        ctx.rect(left - cw * 0.5, c.y + S.header, c.x + c.w - (left - cw * 0.5), c.h - S.header);
+        ctx.clip();
+      }
+      if (hoverRef && hoverRef.card === c) {
+        ctx.fillStyle = C.callerBg;
+        ctx.fillRect(ox + hoverRef.c0 * cw, top + hoverRef.row * lh, (hoverRef.c1 - hoverRef.c0) * cw, lh);
+      }
+      // Every use of the hovered local name is marked, as an editor does.
+      if (hoverLocal && hoverLocal.card === c) {
+        const alpha = ctx.globalAlpha;
+        ctx.globalAlpha = alpha * 0.35;
+        ctx.fillStyle = C.note;
+        for (const [i, spans] of c.locals) {
+          for (const r of spans) if (r.g === hoverLocal.g) ctx.fillRect(ox + r.c0 * cw, top + i * lh, (r.c1 - r.c0) * cw, lh);
+        }
+        ctx.globalAlpha = alpha;
+        for (const [i, spans] of c.locals) {
+          for (const r of spans) if (r.g === hoverLocal.g) ctx.fillRect(ox + r.c0 * cw, top + (i + 0.9) * lh, (r.c1 - r.c0) * cw, Math.max(lh * 0.06, 1 / z));
+        }
+      }
       for (let i = first; i < last; i++) {
         const y = top + (i + 0.5) * lh;
         if (toks && toks[i]) {
@@ -1056,14 +1193,33 @@ function ZoomMap(canvas, opts) {
           for (const t of toks[i]) {
             if (t.text.trim()) {
               ctx.fillStyle = t.color || C.ink;
-              ctx.fillText(t.text, left + col * cw, y);
+              ctx.fillText(t.text, ox + col * cw, y);
             }
             col += t.text.length;
           }
         } else {
           ctx.fillStyle = C.ink;
-          ctx.fillText(c.lines[i], left, y);
+          ctx.fillText(c.lines[i], ox, y);
         }
+      }
+      // A name that refers to another declaration is underlined, as a link.
+      const thin = Math.max(lh * 0.05, 1 / z);
+      for (let i = first; i < last; i++) {
+        for (const r of c.refs.get(i) || []) {
+          const on = hoverRef && hoverRef.card === c && hoverRef.row === i && hoverRef.c0 === r.c0;
+          ctx.fillStyle = on ? C.caller : C.muted;
+          ctx.globalAlpha = a * codeA * (on ? 1 : 0.5);
+          ctx.fillRect(ox + r.c0 * cw, top + (i + 0.9) * lh, (r.c1 - r.c0) * cw, on ? thin * 1.5 : thin);
+        }
+      }
+      // A thin bar shows that the code scrolls sideways, and where it is.
+      const max = maxScroll(c);
+      if (max > 0) {
+        const track = maxX - left, view = track / (track + max);
+        const thumb = Math.max(track * view, 12 / z);
+        ctx.globalAlpha = a * codeA * 0.5;
+        ctx.fillStyle = C.muted;
+        ctx.fillRect(left + (track - thumb) * scroll / max, c.y + c.h - S.bodyPad * 0.7, thumb, Math.max(S.bodyPad * 0.35, 2 / z));
       }
     }
     ctx.restore();
@@ -1221,8 +1377,8 @@ function ZoomMap(canvas, opts) {
     if (c) {
       const n = c.node, right = c.x + c.w - 8;
       if (pin.line >= n.line && pin.line <= n.endLine) {
-        const text = (c.lines[pin.line - n.line] || "").trimEnd();
-        return [Math.min(right, c.x + S.bodyPad + 4 + c.gutter + (text.length + 1) * c.font * CH), lineY(c, pin.line)];
+        const text = (c.lines[rowOf(c, pin.line)] || "").trimEnd();
+        return [clamp(codeLeft(c) - scrollOf(c) + (text.length + 1) * c.font * CH, codeLeft(c), right), lineY(c, pin.line)];
       }
       return [Math.min(right, c.x + 22 + (n.kind || "func").length * 6 + n.name.length * S.nameFont * CH + 12), c.y + 15];
     }
@@ -1298,7 +1454,12 @@ function ZoomMap(canvas, opts) {
       const c = found.card, n = c.node;
       const top = c.y + S.header + S.bodyPad;
       let line = 0;
-      if (c.lh * cam.z >= 4 && y >= top) line = clamp(n.line + Math.floor((y - top) / c.lh), n.line, n.endLine);
+      if (c.lh * cam.z >= 4 && y >= top) {
+        // A deleted row has no line of its own; it is asked about at the line it came before.
+        let i = clamp(Math.floor((y - top) / c.lh), 0, c.lines.length - 1);
+        while (i < c.lines.length - 1 && !c.rowNo[i]) i++;
+        line = c.rowNo[i] || n.endLine;
+      }
       return { node: c.id, line };
     }
     if (found.pkg) return { pkg: found.pkg.id };
@@ -1320,6 +1481,56 @@ function ZoomMap(canvas, opts) {
   }
 
   // ---------- input ----------
+
+  // refAt is the name under a screen point that refers to another
+  // declaration, when the card's code is open enough to read.
+  let hoverRef = null;
+  function refAt(c, sx0, sy0) {
+    const hit = spanAt(c, c.refs, sx0, sy0);
+    return hit && { card: c, row: hit.row, c0: hit.span.c0, c1: hit.span.c1, to: hit.span.to };
+  }
+  // hoverLocal is the local name under the pointer: its card and number.
+  let hoverLocal = null;
+  function localAt(c, sx0, sy0) {
+    const hit = spanAt(c, c.locals, sx0, sy0);
+    return hit && { card: c, g: hit.span.g };
+  }
+  // spanAt finds the span of rows under a screen point, when the card's code
+  // is open enough to read.
+  function spanAt(c, spans, sx0, sy0) {
+    if (!spans.size || codeAlpha(c) < 0.5) return null;
+    const [x, y] = toWorld(sx0, sy0);
+    const top = c.y + S.header + S.bodyPad, left = codeLeft(c), cw = c.font * CH;
+    if (x < left) return null;
+    const row = Math.floor((y - top) / c.lh), col = Math.floor((x - left + scrollOf(c)) / cw);
+    const span = (spans.get(row) || []).find(r => col >= r.c0 && col < r.c1);
+    return span ? { row, span } : null;
+  }
+  // portAt finds the edges that end within a few pixels of a screen point:
+  // the nearest arrow end, and every other edge that ends at the same place.
+  function portAt(sx0, sy0) {
+    let best = null, bestD = Infinity;
+    for (const a of arrows) {
+      // Measure from the middle of the head, which points out from the card.
+      const ang = Math.atan2(a.p[1] - a.from[1], a.p[0] - a.from[0]);
+      const cx = sx(a.p[0]) - Math.cos(ang) * a.px / 2, cy = sy(a.p[1]) - Math.sin(ang) * a.px / 2;
+      const d = Math.hypot(cx - sx0, cy - sy0);
+      if (d < Math.max(22, a.px * 1.5) && d < bestD) { best = a; bestD = d; }
+    }
+    if (!best) return null;
+    const at = best.p;
+    const here = arrows.filter(a => a.e.to === best.e.to && Math.hypot(sx(a.p[0]) - sx(at[0]), sy(a.p[1]) - sy(at[1])) < 3);
+    return { to: best.e.to, x: sx(at[0]), y: sy(at[1]), edges: [...new Set(here.map(a => a.e))] };
+  }
+  // clearPort closes the list of callers when the map moves under it.
+  function clearPort() {
+    if (!hoverPort) return;
+    hoverPort = null;
+    opts.onPort?.(null, true);
+    request();
+  }
+  const samePort = (a, b) => a === b || !!a && !!b && a.to === b.to && a.edges.length === b.edges.length && a.edges.every((e, i) => e === b.edges[i]);
+  const sameRef = (a, b) => a === b || !!a && !!b && a.card === b.card && a.row === b.row && a.c0 === b.c0;
 
   function pick(sx0, sy0) {
     const [x, y] = toWorld(sx0, sy0);
@@ -1363,12 +1574,31 @@ function ZoomMap(canvas, opts) {
       drag.vy = lerp(drag.vy, dy / cam.z / dt, 0.4);
       drag.x = e.offsetX; drag.y = e.offsetY; drag.last = now;
       opts.onTip?.(null);
+      clearPort();
       request();
+      return;
+    }
+    const port = commentMode ? null : portAt(e.offsetX, e.offsetY);
+    if (!samePort(port, hoverPort)) {
+      hoverPort = port;
+      opts.onPort?.(port && {
+        x: port.x, y: port.y, to: port.to,
+        from: port.edges.map(e => ({ id: e.from, line: (e.lines || []).find(l => l >= e.a.node.line && l <= e.a.node.endLine) || 0, via: e.via })),
+      });
+      request();
+    }
+    if (port) {
+      canvas.style.cursor = "pointer";
+      opts.onTip?.(null);
       return;
     }
     const found = pick(e.offsetX, e.offsetY);
     const id = found.card ? found.card.id : null;
     if (id !== hover) { hover = id; request(); }
+    const ref = found.card && !commentMode ? refAt(found.card, e.offsetX, e.offsetY) : null;
+    if (!sameRef(ref, hoverRef)) { hoverRef = ref; request(); }
+    const local = found.card && !commentMode && !ref ? localAt(found.card, e.offsetX, e.offsetY) : null;
+    if ((local && local.card) !== (hoverLocal && hoverLocal.card) || (local && local.g) !== (hoverLocal && hoverLocal.g)) { hoverLocal = local; request(); }
     const onPin = pickPin(e.offsetX, e.offsetY);
     canvas.style.cursor = onPin || (!commentMode && (found.card || found.pkg)) ? "pointer" : commentMode ? "crosshair" : "grab";
     if (onPin) { opts.onTip?.(null); return; }
@@ -1393,8 +1623,14 @@ function ZoomMap(canvas, opts) {
       const pin = pickPin(e.offsetX, e.offsetY);
       if (pin) { opts.onPin?.(pin); drag = null; return; }
       if (commentMode) { opts.onDrop?.(anchorAt(e.offsetX, e.offsetY)); drag = null; return; }
+      // An arrow end with one edge goes straight to its caller; with more,
+      // the list of callers stays open to choose from.
+      const port = portAt(e.offsetX, e.offsetY);
+      if (port) { if (port.edges.length === 1) opts.onNode?.(port.edges[0].from, true); drag = null; return; }
       const found = pick(e.offsetX, e.offsetY);
-      if (found.card) opts.onNode?.(found.card.id);
+      const ref = found.card ? refAt(found.card, e.offsetX, e.offsetY) : null;
+      if (ref) opts.onRef?.(ref.to);
+      else if (found.card) opts.onNode?.(found.card.id);
       else if (found.pkg) opts.onPackage?.(found.pkg.id);
       else opts.onBackground?.();
     }
@@ -1402,7 +1638,11 @@ function ZoomMap(canvas, opts) {
   }
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
-  canvas.addEventListener("pointerleave", () => { if (!drag && hover) { hover = null; request(); } opts.onTip?.(null); });
+  canvas.addEventListener("pointerleave", () => {
+    if (!drag && (hover || hoverRef || hoverPort || hoverLocal)) { hover = null; hoverRef = null; hoverPort = null; hoverLocal = null; request(); }
+    opts.onTip?.(null);
+    opts.onPort?.(null);
+  });
 
   canvas.addEventListener("dblclick", e => {
     const found = pick(e.offsetX, e.offsetY);
@@ -1416,6 +1656,19 @@ function ZoomMap(canvas, opts) {
 
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
+    // A sideways swipe, or shift and the wheel, over code wider than its
+    // card scrolls that card's code instead of zooming the map.
+    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      const c = pick(e.offsetX, e.offsetY).card;
+      if (c && codeAlpha(c) > 0.5 && maxScroll(c) > 0) {
+        const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
+        const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) * unit / cam.z;
+        c.scroll = clamp(scrollOf(c) + d, 0, maxScroll(c));
+        hoverRef = null; hoverLocal = null;
+        request();
+        return;
+      }
+    }
     fly = null; inertia = null;
     const scale = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
     const k = e.ctrlKey ? 0.011 : 0.0024;
@@ -1423,6 +1676,7 @@ function ZoomMap(canvas, opts) {
     const target = clamp((wheel ? wheel.target : cam.z) * factor, minZ(), MAX_Z);
     wheel = { sx: e.offsetX, sy: e.offsetY, target, fast: e.ctrlKey };
     opts.onTip?.(null);
+    clearPort();
     request();
   }, { passive: false });
 

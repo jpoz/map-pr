@@ -19,6 +19,10 @@ type FileChange struct {
 	Path string
 	// Lines holds every line number that was added or modified.
 	Lines map[int]bool
+	// Removed holds the text of deleted lines, keyed by the new line they
+	// came before. Lines deleted at the end of the file are keyed by the
+	// line after the last one.
+	Removed map[int][]string
 	// Deleted is true when the file no longer exists.
 	Deleted bool
 	// Added is true when the file is new.
@@ -95,7 +99,7 @@ func Load(dir, base string) (*Diff, error) {
 	}
 	for p := range strings.FieldsSeq(untracked) {
 		if _, ok := files[p]; !ok {
-			files[p] = &FileChange{Path: p, Added: true, Lines: map[int]bool{}}
+			files[p] = &FileChange{Path: p, Added: true, Lines: map[int]bool{}, Removed: map[int][]string{}}
 		}
 		if _, ok := stats[p]; !ok {
 			if b, err := os.ReadFile(filepath.Join(root, p)); err == nil {
@@ -170,59 +174,73 @@ func SplitPatches(diff string) map[string]string {
 	return patches
 }
 
-var hunkHeader = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
+var hunkHeader = regexp.MustCompile(`^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
-// Parse reads a unified diff made with --unified=0.
+// Parse reads a unified diff made with --unified=0. Inside a hunk it counts
+// lines, so a deleted line that starts with "--- " is not read as a header.
 func Parse(diff string) (map[string]*FileChange, error) {
 	files := map[string]*FileChange{}
 	var cur *FileChange
 	var oldPath string
+	// In a hunk: deleted lines left to read, and the new line they come before.
+	oldLeft, before := 0, 0
 
 	sc := bufio.NewScanner(strings.NewReader(diff))
 	sc.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
+		case oldLeft > 0 && strings.HasPrefix(line, "-"):
+			oldLeft--
+			if cur != nil {
+				cur.Removed[before] = append(cur.Removed[before], line[1:])
+			}
 		case strings.HasPrefix(line, "diff --git "):
-			cur, oldPath = nil, ""
+			cur, oldPath, oldLeft = nil, "", 0
 		case strings.HasPrefix(line, "--- "):
 			oldPath = strings.TrimPrefix(line, "--- ")
 		case strings.HasPrefix(line, "+++ "):
 			newPath := strings.TrimPrefix(line, "+++ ")
 			if newPath == "/dev/null" {
 				p := strings.TrimPrefix(oldPath, "a/")
-				files[p] = &FileChange{Path: p, Deleted: true, Lines: map[int]bool{}}
+				files[p] = &FileChange{Path: p, Deleted: true, Lines: map[int]bool{}, Removed: map[int][]string{}}
 				cur = nil
 				continue
 			}
 			p := strings.TrimPrefix(newPath, "b/")
-			cur = &FileChange{Path: p, Added: oldPath == "/dev/null", Lines: map[int]bool{}}
+			cur = &FileChange{Path: p, Added: oldPath == "/dev/null", Lines: map[int]bool{}, Removed: map[int][]string{}}
 			files[p] = cur
 		case strings.HasPrefix(line, "@@"):
-			if cur == nil {
-				continue
-			}
 			m := hunkHeader.FindStringSubmatch(line)
 			if m == nil {
 				return nil, fmt.Errorf("bad hunk header: %q", line)
 			}
-			start, _ := strconv.Atoi(m[1])
-			count := 1
-			if m[2] != "" {
-				count, _ = strconv.Atoi(m[2])
+			oldLeft = count(m[1])
+			start, _ := strconv.Atoi(m[2])
+			n := count(m[3])
+			// With no new lines, start is the line before the gap.
+			before = start
+			if n == 0 {
+				before = start + 1
 			}
-			if count == 0 {
-				// A pure deletion. Mark the line it follows so the
-				// function that held the deleted code counts as changed.
-				cur.Lines[max(start, 1)] = true
+			if cur == nil {
 				continue
 			}
-			for l := start; l < start+count; l++ {
+			for l := start; l < start+n; l++ {
 				cur.Lines[l] = true
 			}
 		}
 	}
 	return files, sc.Err()
+}
+
+// count reads a hunk header's line count, which is 1 when it is left out.
+func count(s string) int {
+	if s == "" {
+		return 1
+	}
+	n, _ := strconv.Atoi(s)
+	return n
 }
 
 func git(dir string, args ...string) (string, error) {
