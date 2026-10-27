@@ -2,7 +2,7 @@
 
 Draws a Go pull request as a map you zoom through: the declarations the branch
 changes (functions, methods, types, constants, variables), the code that uses
-them, and the entry points that reach them. With the `/make-pr-map` skill,
+them, and the entry points that reach them. With the `/map-pr` skill,
 Claude adds themes, a guided tour and notes, and answers questions you drop on
 the map.
 
@@ -15,10 +15,10 @@ the map.
 /plugin install map-pr@map-pr
 ```
 
-Then ask for a map: `/make-pr-map https://github.com/owner/repo/pull/123`, a PR
+Then ask for a map: `/map-pr https://github.com/owner/repo/pull/123`, a PR
 number in the current repo, or nothing for the current branch. (If another
-command already uses the name, the skill is `/map-pr:make-pr-map`.) To install
-only the skill, copy `skills/make-pr-map/` to `~/.claude/skills/`.
+command already uses the name, the skill is `/map-pr:map-pr`.) To install
+only the skill, copy `skills/map-pr/` to `~/.claude/skills/`.
 
 The skill needs Go, git and the GitHub CLI (`gh`, logged in). It installs the
 `map-pr` command itself, built with the Go version of the repository it maps,
@@ -96,7 +96,7 @@ entry point that a real request reaches.
 (click one to light up its declarations), a guided tour (arrow keys step through
 it), and a note on any declaration. Notes refer to declarations by the keys that
 `-format outline` prints. map-pr refuses notes that name a key that is not on the
-map. The `/make-pr-map` skill (`skills/make-pr-map/`) has Claude write them.
+map. The `/map-pr` skill (`skills/map-pr/`) has Claude write them.
 
 Try it: `scripts/demo.sh` makes a repo that changes `authGoogle` and maps it.
 

@@ -1,10 +1,10 @@
 ---
-name: make-pr-map
-description: Build an interactive, zoomable map of a Go pull request — the declarations it changes (functions, methods, types, constants, variables), the code that uses them, plus Claude-written themes, a guided tour, and per-declaration notes — as one HTML page. Use when the user asks to map, visualize, or explain a PR "as a map", or runs /make-pr-map with a PR URL, number, or nothing (current branch).
+name: map-pr
+description: Build an interactive, zoomable map of a Go pull request — the declarations it changes (functions, methods, types, constants, variables), the code that uses them, plus Claude-written themes, a guided tour, and per-declaration notes — as one HTML page. Use when the user asks to map, visualize, or explain a PR "as a map", or runs /map-pr with a PR URL, number, or nothing (current branch).
 argument-hint: "[PR URL | owner/repo#N | N | empty for current branch]"
 ---
 
-# make-pr-map
+# map-pr
 
 `map-pr` (github.com/jpoz/map-pr) finds the changed Go declarations and their
 users with type information. You add the meaning: themes, a tour and notes.
