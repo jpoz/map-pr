@@ -18,7 +18,7 @@ func TestParse(t *testing.T) {
 +	new()
 @@ -20,3 +21,0 @@ func z() {
 -	a()
--	b()
+--- not a header
 -	c()
 diff --git a/new.go b/new.go
 new file mode 100644
@@ -40,8 +40,14 @@ deleted file mode 100644
 		t.Fatal(err)
 	}
 
-	if got, want := slices.Sorted(maps.Keys(files["a.go"].Lines)), []int{4, 5, 12, 21}; !slices.Equal(got, want) {
+	if got, want := slices.Sorted(maps.Keys(files["a.go"].Lines)), []int{4, 5, 12}; !slices.Equal(got, want) {
 		t.Errorf("a.go lines = %v, want %v", got, want)
+	}
+	// A replaced line's old text comes before its new line; a pure deletion
+	// comes before the line after the gap.
+	removed := map[int][]string{12: {"\told()"}, 22: {"\ta()", "-- not a header", "\tc()"}}
+	if got := files["a.go"].Removed; !maps.EqualFunc(got, removed, slices.Equal) {
+		t.Errorf("a.go removed = %v, want %v", got, removed)
 	}
 	if !files["new.go"].Added {
 		t.Error("new.go should be added")

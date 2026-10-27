@@ -3,6 +3,7 @@
 package callgraph
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -80,13 +81,27 @@ type Node struct {
 	Exported bool   `json:"exported"`
 	Source   string `json:"source"`
 	Changed  []int  `json:"changed,omitempty"`
-	Callers  int    `json:"callers"`
-	Expanded bool   `json:"expanded"`
+	// Removed holds the deleted lines inside the declaration, keyed by the
+	// line they came before (EndLine+1 for lines deleted at its end).
+	Removed  map[int][]string `json:"removed,omitempty"`
+	Callers  int              `json:"callers"`
+	Expanded bool             `json:"expanded"`
 	// Hidden counts users left off the map because there were too many.
 	Hidden int `json:"hidden,omitempty"`
 	// Entry is set when execution starts here.
 	Entry *Entry `json:"entry,omitempty"`
+	// Top is set on a changed function that no other changed function
+	// calls, directly or through other code: the place to start reading.
+	Top bool `json:"top,omitempty"`
+	// Locals groups the uses of each local name (variable, parameter,
+	// constant, type or label) declared inside the declaration and used
+	// more than once, so the page can mark them all together.
+	Locals [][]Span `json:"locals,omitempty"`
 }
+
+// Span is a place in a file: a line, a 1-based column in bytes, and a length
+// in bytes. It is sent as [line, col, len].
+type Span [3]int
 
 // Edge points from the declaration that uses a symbol to the symbol.
 type Edge struct {
@@ -176,9 +191,10 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 	packages.PrintErrors(pkgs)
 
 	funcs := map[string]*declInfo{}
-	refs := map[string]map[ref]bool{} // callee ID -> places that use it
-	routes := map[string][]string{}   // handler ID -> route patterns
-	started := map[string]bool{}      // IDs of functions started with go
+	refs := map[string]map[ref]bool{}              // callee ID -> places that use it
+	locals := map[string]map[types.Object][]Span{} // declaration ID -> local -> uses
+	routes := map[string][]string{}                // handler ID -> route patterns
+	started := map[string]bool{}                   // IDs of functions started with go
 	seenFiles := map[string]bool{}
 
 	for _, pkg := range pkgs {
@@ -268,6 +284,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 					if obj.Name() == "main" && decl.Recv == nil && pkg.Name == "main" {
 						funcs[id].node.Entry = &Entry{Kind: EntryMain}
 					}
+					locals[id] = localsIn(pkg, decl)
 					// The receiver is left out: every method would otherwise use its own type.
 					collect(id, decl.Type)
 					if decl.Body != nil {
@@ -328,12 +345,14 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 				changed = append(changed, l)
 			}
 		}
-		if len(changed) == 0 {
+		removed := removedIn(fc, f.node.Line, f.node.EndLine)
+		if len(changed) == 0 && len(removed) == 0 {
 			continue
 		}
 		f.node.Changed = changed
+		f.node.Removed = removed
 		f.node.Status = StatusModified
-		if len(changed) == f.node.EndLine-f.node.Line+1 {
+		if len(changed) == f.node.EndLine-f.node.Line+1 && len(removed) == 0 {
 			f.node.Status = StatusAdded
 		}
 		onMap[f.node.ID] = true
@@ -406,9 +425,11 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 		n := funcs[id].node
 		n.Source = readLines(filepath.Join(d.Root, n.File), n.Line, n.EndLine)
 		n.Callers = countCallers(refs[id])
+		n.Locals = localGroups(locals[id])
 		m.Nodes = append(m.Nodes, n)
 	}
 	sort.Slice(m.Nodes, func(i, j int) bool { return m.Nodes[i].ID < m.Nodes[j].ID })
+	markTops(m.Nodes, funcs, refs)
 
 	for _, e := range edges {
 		sort.Ints(e.Lines)
@@ -423,6 +444,134 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 		return m.Edges[i].From < m.Edges[j].From
 	})
 	return m, nil
+}
+
+// localsIn finds every use of each local name in a function, its receiver
+// and parameters included.
+func localsIn(pkg *packages.Package, decl *ast.FuncDecl) map[types.Object][]Span {
+	uses := map[types.Object][]Span{}
+	ast.Inspect(decl, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if obj := localObject(pkg, ident); obj != nil {
+			p := pkg.Fset.Position(ident.Pos())
+			uses[obj] = append(uses[obj], Span{p.Line, p.Column, len(ident.Name)})
+		}
+		return true
+	})
+	return uses
+}
+
+// localObject returns the object an identifier names when that object is
+// declared inside a function: a variable or parameter (not a struct field),
+// a constant, a type or a label. It returns nil for anything else.
+func localObject(pkg *packages.Package, ident *ast.Ident) types.Object {
+	obj := pkg.TypesInfo.Defs[ident]
+	if obj == nil {
+		obj = pkg.TypesInfo.Uses[ident]
+	}
+	if obj == nil || obj.Pkg() != pkg.Types || ident.Name == "_" {
+		return nil
+	}
+	switch o := obj.(type) {
+	case *types.Var:
+		if o.IsField() {
+			return nil
+		}
+	case *types.Label:
+		return obj // a label's scope is its function, not a block
+	case *types.Const, *types.TypeName:
+	default:
+		return nil
+	}
+	if p := obj.Parent(); p == nil || p == pkg.Types.Scope() {
+		return nil
+	}
+	return obj
+}
+
+// localGroups orders the uses of each local by place and keeps the locals
+// used more than once, in the order they are first used.
+func localGroups(byObj map[types.Object][]Span) [][]Span {
+	var groups [][]Span
+	for _, spans := range byObj {
+		if len(spans) < 2 {
+			continue
+		}
+		slices.SortFunc(spans, func(a, b Span) int { return cmp.Or(a[0]-b[0], a[1]-b[1]) })
+		groups = append(groups, slices.Compact(spans))
+	}
+	slices.SortFunc(groups, func(a, b []Span) int { return cmp.Or(a[0][0]-b[0][0], a[0][1]-b[0][1]) })
+	return groups
+}
+
+// removedIn returns the lines deleted inside the declaration on lines
+// first to last. Lines deleted just before first belong to it only when first
+// changed too (its old first lines were replaced); else they were above it.
+// Lines deleted just after last belong to it only when last is a new line.
+func removedIn(fc *gitdiff.FileChange, first, last int) map[int][]string {
+	var out map[int][]string
+	for l, text := range fc.Removed {
+		inside := l > first && l <= last ||
+			l == first && fc.Lines[first] ||
+			l == last+1 && fc.Lines[last]
+		if !inside {
+			continue
+		}
+		if out == nil {
+			out = map[int][]string{}
+		}
+		out[l] = text
+	}
+	return out
+}
+
+// markTops sets Top on the changed functions outside tests that no other
+// changed function reaches through calls anywhere in the repository. Two
+// changed functions that reach each other are at the same level.
+func markTops(nodes []*Node, decls map[string]*declInfo, refs map[string]map[ref]bool) {
+	changed := map[string]*Node{}
+	for _, n := range nodes {
+		if (n.Status == StatusAdded || n.Status == StatusModified) && !n.IsTest && (n.Kind == KindFunc || n.Kind == KindMethod) {
+			changed[n.ID] = n
+		}
+	}
+	// above[id] holds the changed functions that reach id.
+	above := map[string]map[string]bool{}
+	for id := range changed {
+		above[id] = map[string]bool{}
+		seen := map[string]bool{id: true}
+		for frontier := []string{id}; len(frontier) > 0; {
+			var next []string
+			for _, to := range frontier {
+				for r := range refs[to] {
+					if seen[r.from] {
+						continue
+					}
+					seen[r.from] = true
+					if d := decls[r.from]; d == nil || d.node.IsTest {
+						continue
+					}
+					if changed[r.from] != nil {
+						above[id][r.from] = true
+					}
+					next = append(next, r.from)
+				}
+			}
+			frontier = next
+		}
+	}
+	for id, n := range changed {
+		n.Top = true
+		for a := range above[id] {
+			if !above[a][id] {
+				n.Top = false
+				break
+			}
+		}
+	}
 }
 
 // shortenIDs makes node IDs relative to the repository root. An ID is a

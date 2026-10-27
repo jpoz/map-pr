@@ -128,7 +128,11 @@ async function tokenize(n, text) {
 const tip = document.getElementById("tip");
 const map = ZoomMap(document.getElementById("map"), {
   tokenize,
-  onNode: id => selectNode(id, { fly: false }),
+  onNode: (id, fly = false) => selectNode(id, { fly }),
+  // A name in a card's code that refers to another declaration goes to it:
+  // its card when it is on the map, else its definition in the panel.
+  refsOf: id => (USES[id] || []).flatMap(u => declOf(u.to) ? [{ to: u.to, name: identName(declOf(u.to)), lines: u.lines }] : []),
+  onRef: to => byId[to] ? selectNode(to) : showDef(to),
   onPackage: pkg => selectPackage(pkg),
   onBackground: () => { if (location.hash) home({ fly: false }); },
   onPin: id => showThread(id),
@@ -136,12 +140,50 @@ const map = ZoomMap(document.getElementById("map"), {
   onLevel: level => {
     for (const b of document.querySelectorAll("[data-level]")) b.classList.toggle("on", b.dataset.level === level);
   },
+  onPort: (p, now) => showPort(p, now),
   onTip: t => {
     if (!t) { tip.hidden = true; return; }
     tip.innerHTML = `<b>${esc(t.title)}</b><span>${esc(t.sub)}</span>`;
     tip.hidden = false;
     tip.style.transform = `translate(${t.x + 14}px, ${t.y + 14}px)`;
   },
+});
+
+// ---------- callers at an arrow ----------
+
+// showPort lists the declarations whose edges end at the arrow under the
+// pointer, so a reader can go back to any of them. The list stays open while
+// the pointer moves onto it, and closes a moment after it leaves both.
+const portMenu = document.getElementById("ports");
+let portTimer = 0;
+function showPort(p, now = false) {
+  clearTimeout(portTimer);
+  if (!p) {
+    if (now) portMenu.hidden = true;
+    else portTimer = setTimeout(() => { if (!portMenu.matches(":hover")) portMenu.hidden = true; }, 300);
+    return;
+  }
+  const to = declOf(p.to);
+  const from = p.from.filter(f => byId[f.id]).sort((a, b) => byId[a.id].name.localeCompare(byId[b.id].name));
+  portMenu.innerHTML = `<div class="head">${from.length} ${from.length === 1 ? "use" : "uses"} of <b>${esc(to ? to.name : "")}</b></div>` +
+    `<ul>${from.map(f => {
+      const n = byId[f.id];
+      const via = f.via && f.via.length ? ` · via ${esc(f.via.join(" → "))}` : "";
+      return `<li data-id="${esc(f.id)}"><span class="name">${badge(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
+        `<span class="loc">${esc(n.file)}${f.line ? ":" + f.line : ""}${via}</span></li>`;
+    }).join("")}</ul>`;
+  portMenu.hidden = false;
+  const box = portMenu.parentElement.getBoundingClientRect();
+  const x = Math.min(p.x + 12, box.width - portMenu.offsetWidth - 8), y = Math.min(p.y + 12, box.height - portMenu.offsetHeight - 8);
+  portMenu.style.transform = `translate(${Math.max(8, x)}px, ${Math.max(8, y)}px)`;
+}
+portMenu.addEventListener("mouseleave", () => { portTimer = setTimeout(() => { portMenu.hidden = true; }, 300); });
+portMenu.addEventListener("mouseenter", () => clearTimeout(portTimer));
+portMenu.addEventListener("click", e => {
+  const li = e.target.closest("li[data-id]");
+  if (!li) return;
+  portMenu.hidden = true;
+  selectNode(li.dataset.id);
 });
 
 function mapData() {
@@ -155,14 +197,21 @@ function mapData() {
 
 // ---------- panel ----------
 
+// codeBlock shows a declaration's source with the lines the change deleted
+// before the line they came before. A deleted row has no .no or .code cell,
+// so those cells stay one per source line.
 function codeBlock(n, highlight = []) {
   const changed = new Set(n.changed || []);
   const hl = new Set(highlight);
-  return `<pre class="src" data-node="${esc(n.id)}">` + n.source.split("\n").map((text, i) => {
+  const removed = n.removed || {};
+  const del = no => (removed[no] || []).map(text =>
+    `<span class="ln del"><span class="gone">−</span><span class="old">${esc(text)}</span></span>`).join("");
+  const lines = n.source.split("\n");
+  return `<pre class="src" data-node="${esc(n.id)}">` + lines.map((text, i) => {
     const no = n.line + i;
     const cls = [changed.has(no) && "chg", hl.has(no) && "hl"].filter(Boolean).join(" ");
-    return `<span class="ln ${cls}"><span class="no">${no}</span><span class="code">${esc(text)}</span></span>`;
-  }).join("") + "</pre>";
+    return del(no) + `<span class="ln ${cls}"><span class="no">${no}</span><span class="code">${esc(text)}</span></span>`;
+  }).join("") + del(n.line + lines.length) + "</pre>";
 }
 
 const badge = n => `<span class="badge ${n.status}">${statusLabel(n)}</span>`;
@@ -559,8 +608,8 @@ function route() {
 window.addEventListener("popstate", route);
 
 function showSummary() {
-  const changes = group => linkList(group.filter(isChange).map(n => [n.id,
-    `<span class="name">${badge(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
+  const changes = group => linkList(group.filter(isChange).sort((a, b) => !!b.top - !!a.top).map(n => [n.id,
+    `<span class="name">${badge(n)} ${kindTag(n)} ${n.top ? `<span class="top" title="No other change calls it: start here">★</span> ` : ""}${esc(n.name)}</span>` +
     (n.exported ? ` <span class="badge exported">exported</span>` : "") +
     (n.isTest ? "" : ` <span class="loc">${n.callers - testUsers(n.id)} code · ${testUsers(n.id)} tests</span>`)]));
   const themes = NOTES.themes.map(t => `<li data-theme="${esc(t.id)}">
