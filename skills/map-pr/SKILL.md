@@ -82,6 +82,7 @@ Look especially for:
 ```json
 {
   "title": "repo #N · PR title",
+  "url": "https://github.com/owner/repo/pull/N (the page title links here; omit when there is no PR)",
   "summary": "2 short paragraphs: what changes and why, for someone who has not seen the PR.",
   "themes": [
     {

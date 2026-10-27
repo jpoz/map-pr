@@ -88,7 +88,17 @@ const themeById = Object.fromEntries(NOTES.themes.map(t => [t.id, t]));
 const themesOf = n => NOTES.themes.filter(t => (t.nodes || []).includes(n.key));
 
 if (NOTES.title) {
-  document.getElementById("title").textContent = NOTES.title;
+  const h1 = document.getElementById("title");
+  h1.textContent = NOTES.title;
+  // The title links to the PR. The notes check allows only http(s) links.
+  if (/^https?:\/\//.test(NOTES.url || "")) {
+    const a = document.createElement("a");
+    a.href = NOTES.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = NOTES.title;
+    h1.replaceChildren(a);
+  }
   document.title = NOTES.title;
 }
 document.getElementById("meta").innerHTML =
@@ -612,6 +622,15 @@ function showSummary() {
     `<span class="name">${badge(n)} ${kindTag(n)} ${n.top ? `<span class="top" title="No other change calls it: start here">★</span> ` : ""}${esc(n.name)}</span>` +
     (n.exported ? ` <span class="badge exported">exported</span>` : "") +
     (n.isTest ? "" : ` <span class="loc">${n.callers - testUsers(n.id)} code · ${testUsers(n.id)} tests</span>`)]));
+  // The top functions (★) are where to start: changed code that no other
+  // change calls. The ones that reach the most changes come first.
+  const tops = code.filter(n => n.top)
+    .map(n => ({ n, reach: changesReached(n.id).filter(id => id !== n.id).length }))
+    .sort((a, b) => b.reach - a.reach || a.n.file.localeCompare(b.n.file) || a.n.line - b.n.line);
+  const startHere = tops.length ? `<h3><span class="top">★</span> Start here</h3>
+    <p class="empty">Changed code that no other change calls. Click one to zoom in to its code.</p>
+    ${linkList(tops.map(({ n, reach }) => [n.id, `<span class="name">${badge(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
+      ` <span class="loc">${esc(n.file)}:${n.line}${reach ? ` · reaches ${reach} more change${reach === 1 ? "" : "s"}` : ""}</span>`]))}` : "";
   const themes = NOTES.themes.map(t => `<li data-theme="${esc(t.id)}">
       <div><span class="chip" style="background:${t.color}"></span><span class="title">${esc(t.title)}</span>
       <span class="loc">${(t.nodes || []).length} declarations</span></div>
@@ -620,6 +639,7 @@ function showSummary() {
   setPanel(`
     ${NOTES.summary ? `<div class="prose">${md(NOTES.summary)}</div>` : ""}
     ${NOTES.tour.length ? `<div class="tour-nav"><button class="primary" data-step="0">Start the tour (${NOTES.tour.length} steps) →</button></div>` : ""}
+    ${startHere}
     ${comments.on && comments.threads.length ? `<h3>Questions</h3><div class="questions" data-for="">${threadList(comments.threads)}</div>` : ""}
     ${themes ? `<h3>Themes</h3><ul class="links themes">${themes}</ul>` : ""}
     ${entries.length ? `<h3>Entry points · start here <button class="mini" data-entries>Show on map</button></h3>

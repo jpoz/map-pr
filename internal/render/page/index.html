@@ -30,12 +30,16 @@
   header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 16px;
     align-items: baseline; flex-wrap: wrap; }
   header h1 { font-size: 16px; margin: 0; }
+  header h1 a { color: inherit; text-decoration: none; }
+  header h1 a:hover { text-decoration: underline; }
   header .meta { color: var(--muted); font-size: 13px; }
   header code { font-size: 12px; }
   .legend { margin-left: auto; display: flex; gap: 12px; font-size: 12px; color: var(--muted); }
   .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px;
     border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
   .legend .l-added::before { background: var(--added); }
+  .legend .l-top { cursor: help; }
+  .legend .l-top::before { content: "★"; width: auto; height: auto; color: var(--modified); font-size: 13px; vertical-align: 0; }
   .legend .l-modified::before { background: var(--modified); }
   .legend .l-caller::before { background: var(--caller); }
   .legend .l-entry::before { background: var(--entry); }
@@ -199,7 +203,7 @@
   <h1 id="title">PR Map</h1>
   <div class="meta" id="meta"></div>
   <div class="legend">
-    <span class="l-added">added</span><span class="l-modified">modified</span><span class="l-caller">uses a change</span><span class="l-entry">entry point</span>
+    <span class="l-added">added</span><span class="l-modified">modified</span><span class="l-caller">uses a change</span><span class="l-entry">entry point</span><span class="l-top" title="A changed function that no other changed function calls, directly or through other code. Start reviewing here. A package shows how many it holds.">start here</span>
     <label class="toggle"><input type="checkbox" id="show-tests"> show tests</label>
   </div>
 </header>
