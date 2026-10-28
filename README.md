@@ -6,7 +6,7 @@ them, and the entry points that reach them. With the `/map-pr` skill,
 Claude adds themes, a guided tour and notes, and answers questions you drop on
 the map.
 
-**Example:** [the map of map-pr #2](https://jpoz.github.io/map-pr/example/),
+**Example:** [the map of map-pr #2](https://www.jpoz.net/map-pr/example/),
 made by `/map-pr` for one of this repository's own pull requests.
 
 ## Install
