@@ -95,12 +95,13 @@ function unwrap(e) {
   return e;
 }
 const isFuncLit = e => !!e && (ts.isArrowFunction(e) || ts.isFunctionExpression(e));
-// isFuncValue is true for a function, or a call that wraps one, as in
-// memo(() => ...) or withAuth(async (req) => ...).
-function isFuncValue(e) {
+// isFuncValue is true for a function, or a call that wraps one and returns
+// a function, as in memo(() => ...) or withAuth(async (req) => ...).
+function isFuncValue(e, checker) {
   e = unwrap(e);
   if (isFuncLit(e)) return true;
-  return !!e && ts.isCallExpression(e) && e.arguments.length > 0 && isFuncLit(unwrap(e.arguments[e.arguments.length - 1]));
+  if (!e || !ts.isCallExpression(e) || !e.arguments.some(a => isFuncLit(unwrap(a)))) return false;
+  return checker.getTypeAtLocation(e).getCallSignatures().length > 0;
 }
 const hasExport = n => !!(ts.getCombinedModifierFlags(n) & ts.ModifierFlags.Export);
 const hasDefault = n => !!(ts.getCombinedModifierFlags(n) & ts.ModifierFlags.Default);
@@ -159,7 +160,7 @@ function scanFile(sf, checker) {
     let prev = null;
     for (const m of st.members) {
       const isFunc = ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m) || ts.isGetAccessor(m) || ts.isSetAccessor(m) ||
-        (ts.isPropertyDeclaration(m) && isFuncValue(m.initializer));
+        (ts.isPropertyDeclaration(m) && isFuncValue(m.initializer, checker));
       if (!isFunc) {
         props.push(m);
         prev = null;
@@ -210,7 +211,7 @@ function scanFile(sf, checker) {
       const isConst = !!(st.declarationList.flags & (ts.NodeFlags.Const | ts.NodeFlags.Using));
       for (const v of st.declarationList.declarations) {
         const init = unwrap(v.initializer);
-        const kind = isFuncValue(v.initializer) ? "func" : init && ts.isClassExpression(init) ? "type" : isConst ? "const" : "var";
+        const kind = isFuncValue(v.initializer, checker) ? "func" : init && ts.isClassExpression(init) ? "type" : isConst ? "const" : "var";
         const bodies = [v.type, v.initializer].filter(Boolean);
         if (ts.isIdentifier(v.name)) {
           const d = add(v.name.text, kind, v.name, st, st, bodies, [v], { exported, func: kind === "func" });
@@ -227,7 +228,7 @@ function scanFile(sf, checker) {
       run = null;
       const e = unwrap(st.expression);
       if (ts.isIdentifier(e) || ts.isPropertyAccessExpression(e)) continue; // names a declaration made above
-      const kind = isFuncValue(st.expression) ? "func" : ts.isClassExpression(e) ? "type" : "var";
+      const kind = isFuncValue(st.expression, checker) ? "func" : ts.isClassExpression(e) ? "type" : "var";
       const d = add("default", kind, st, st, st, [st.expression], [st], { exported: !isTest, func: kind === "func" });
       d.routes.push(nextRoute(rel, "default", true));
     } else if (ts.isImportDeclaration(st) || ts.isImportEqualsDeclaration(st) || ts.isExportDeclaration(st) ||

@@ -30,7 +30,10 @@ declare const app: { post(p: string, h: Function): void };
 
 export const handleStart = (token: string) => new Session().start(token);
 
+export const tokens = ["a", "b"].map(t => t.trim());
+
 app.post("/start", handleStart);
+console.log(tokens);
 `
 
 func TestBuildTypeScript(t *testing.T) {
@@ -89,6 +92,16 @@ func TestBuildTypeScript(t *testing.T) {
 		if got[k] != w {
 			t.Errorf("node %s = %q, want %q", k, got[k], w)
 		}
+	}
+	// An array made with a callback is a value, not a function.
+	tokens := ""
+	for _, def := range m.Defs {
+		if def.Name == "tokens" {
+			tokens = string(def.Kind)
+		}
+	}
+	if tokens != string(KindConst) {
+		t.Errorf("tokens kind = %q, want const", tokens)
 	}
 	// A change inside a method is not a change of its class.
 	if _, ok := got["src/auth.ts:Session"]; ok {
