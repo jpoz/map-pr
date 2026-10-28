@@ -118,3 +118,51 @@ func TestBuildTypeScript(t *testing.T) {
 		t.Errorf("edges = %v, want %v", edges, wantEdges)
 	}
 }
+
+func TestBuildJoinsPackages(t *testing.T) {
+	if exec.Command("node", "-e", `require("typescript")`).Run() != nil {
+		t.Skip("node with the typescript package is not available (set NODE_PATH to run this test)")
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod":     "module example.com/a\n\ngo 1.22\n",
+		"a/a.go":     "package a\n\nfunc F() int { return 1 }\n",
+		"a/page.js":  "export function show() {\n  return 1;\n}\n",
+		"web/app.js": "export function run() {\n  return 2;\n}\n",
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &gitdiff.Diff{Root: root, Files: map[string]*gitdiff.FileChange{
+		"a/a.go":     {Path: "a/a.go", Added: true},
+		"a/page.js":  {Path: "a/page.js", Added: true},
+		"web/app.js": {Path: "web/app.js", Added: true},
+	}}
+	m, err := Build(d, Options{Depth: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, n := range m.Nodes {
+		got[n.Name] = n.Package
+	}
+	// A JS file in a Go package's folder joins that package; others keep their own.
+	want := map[string]string{"F": "example.com/a/a", "show": "example.com/a/a", "run": filepath.Base(root) + "/web"}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("package of %s = %q, want %q", name, got[name], w)
+		}
+	}
+}

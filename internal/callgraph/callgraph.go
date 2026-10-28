@@ -11,6 +11,7 @@ import (
 	"go/types"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -244,8 +245,27 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 			// A Go repository can hold some scripts; map its Go code anyway.
 			fmt.Fprintln(os.Stderr, "map-pr: skipping TypeScript:", err)
 		}
+		if goRepo {
+			joinPackages(s)
+		}
 	}
 	return build(d, s, opts), nil
+}
+
+// joinPackages puts TypeScript and JavaScript files that sit in the folder of
+// a Go package into that package, so the map shows one package per folder.
+func joinPackages(s *scan) {
+	goPkg := map[string]string{}
+	for _, d := range s.decls {
+		if strings.HasSuffix(d.node.File, ".go") {
+			goPkg[path.Dir(d.node.File)] = d.node.Package
+		}
+	}
+	for _, d := range s.decls {
+		if p, ok := goPkg[path.Dir(d.node.File)]; ok && isTSFile(d.node.File) {
+			d.node.Package = p
+		}
+	}
 }
 
 // isGoRepo reports whether the repository root holds a Go module or workspace.
