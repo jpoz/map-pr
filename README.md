@@ -1,5 +1,7 @@
 # map-pr
 
+<img width="800" height="488" alt="CleanShot 2026-10-28 at 8 28 18 AM" src="https://github.com/user-attachments/assets/4e71583e-93c9-4ecf-bd12-853419478c1d" />
+
 Draws a Go or TypeScript pull request as a map you zoom through: the
 declarations the branch changes (functions, methods, types, constants,
 variables), the code that uses them, and the entry points that reach them. With the `/map-pr` skill,
