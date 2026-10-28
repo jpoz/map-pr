@@ -66,7 +66,7 @@ function ZoomMap(canvas, opts) {
   const statusBg = s => s === "added" ? C.addedBg : s === "modified" ? C.modifiedBg : s === "entry" ? C.entryBg : C.callerBg;
   const isChanged = n => n.status === "added" || n.status === "modified";
   // entryTag is the short label of how execution enters at a declaration.
-  const entryTag = e => ({ http: "▶ HTTP", goroutine: "▶ GO", main: "▶ MAIN", root: "NO CALLERS" })[e.kind] || "▶ ENTRY";
+  const entryTag = e => ({ http: "▶ HTTP", goroutine: "▶ GO", main: "▶ MAIN", module: "▶ TOP LEVEL", root: "NO CALLERS" })[e.kind] || "▶ ENTRY";
 
   // ---------- layout ----------
 

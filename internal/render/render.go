@@ -81,6 +81,8 @@ func writeEntries(p func(string, ...any), m *callgraph.Map, byID map[string]*cal
 			if len(n.Entry.Routes) > 0 {
 				how += " " + strings.Join(n.Entry.Routes, ", ")
 			}
+		case callgraph.EntryModule:
+			how = "top-level code, run when the module is loaded"
 		case callgraph.EntryRoot:
 			how = "no callers outside tests (an interface, reflection, or not used yet)"
 		}
@@ -169,7 +171,7 @@ func Outline(w io.Writer, m *callgraph.Map) error {
 	}
 
 	if len(m.OtherFiles) > 0 {
-		p("\nOTHER CHANGED FILES (not Go)\n")
+		p("\nOTHER CHANGED FILES (not Go or TypeScript)\n")
 		for _, f := range m.OtherFiles {
 			p("  %s\n", f)
 		}

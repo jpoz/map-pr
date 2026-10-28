@@ -46,14 +46,15 @@ const statusLabel = n => ({ caller: "uses a change", entry: "entry point" })[n.s
 // ---------- entry points ----------
 
 // Entry points are where execution starts: HTTP handlers, main, functions
-// started with go, and code with no callers. They are a good place to start
+// started with go, top-level module code, and code with no callers. They are a good place to start
 // a review: each one shows how the changes are reached.
-const entryTag = e => ({ http: "HTTP", goroutine: "go", main: "main", root: "no callers" })[e.kind] || "entry";
+const entryTag = e => ({ http: "HTTP", goroutine: "go", main: "main", module: "top level", root: "no callers" })[e.kind] || "entry";
 function entryText(e) {
   switch (e.kind) {
     case "http": return e.routes && e.routes.length ? e.routes.join(", ") : "HTTP handler";
     case "goroutine": return "started with a go statement";
     case "main": return "the program's main()";
+    case "module": return "top-level code of a module, run when the module is loaded";
     default: return "no callers outside tests: called through an interface, by reflection, or not used yet";
   }
 }
@@ -903,7 +904,7 @@ split.addEventListener("pointerdown", evt => {
 
 if (!nodes.length) {
   document.getElementById("stage").insertAdjacentHTML("beforeend",
-    `<p class="empty" style="position:absolute;inset:24px">No changed Go declarations found.</p>`);
+    `<p class="empty" style="position:absolute;inset:24px">No changed Go or TypeScript declarations found.</p>`);
 }
 map.setData(mapData());
 map.fit(false);

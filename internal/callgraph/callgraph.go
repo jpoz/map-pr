@@ -1,5 +1,6 @@
-// Package callgraph builds a map of changed Go declarations (functions,
-// methods, types, constants and variables) and the code that uses them.
+// Package callgraph builds a map of changed Go and TypeScript declarations
+// (functions, methods, types, constants and variables) and the code that
+// uses them.
 package callgraph
 
 import (
@@ -10,6 +11,7 @@ import (
 	"go/types"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -40,6 +42,9 @@ const (
 	EntryMain      EntryKind = "main"      // func main
 	EntryHTTP      EntryKind = "http"      // an HTTP handler
 	EntryGoroutine EntryKind = "goroutine" // started with a go statement
+	// EntryModule is the top-level code of a TypeScript or JavaScript
+	// module, which runs when the module is loaded.
+	EntryModule EntryKind = "module"
 	// EntryRoot is code with no callers in the repository: often a method
 	// called through an interface, or a function called by reflection.
 	EntryRoot EntryKind = "root"
@@ -62,6 +67,9 @@ const (
 	KindType   Kind = "type"
 	KindConst  Kind = "const"
 	KindVar    Kind = "var"
+	// KindModule is top-level code of a TypeScript or JavaScript file that
+	// declares nothing, or a describe("...") or test("...") in a test file.
+	KindModule Kind = "module"
 )
 
 // Node is one package-level declaration.
@@ -169,6 +177,20 @@ type declInfo struct {
 	node *Node
 	// handler is true for a function with an HTTP handler's signature.
 	handler bool
+	// inner holds the first and last lines of declarations nested inside
+	// this one that are nodes of their own, such as the methods of a
+	// TypeScript class. Their changes are not changes of this declaration.
+	inner [][2]int
+}
+
+// inside reports whether line l belongs to a declaration nested in d.
+func (d *declInfo) inside(l int) bool {
+	for _, r := range d.inner {
+		if l >= r[0] && l <= r[1] {
+			return true
+		}
+	}
+	return false
 }
 
 type ref struct {
@@ -176,25 +198,102 @@ type ref struct {
 	line int
 }
 
-// Build loads every package in the repository and makes the map.
+// scan is what reading the source of a repository finds: its declarations,
+// the places that use each one, and how execution reaches them.
+type scan struct {
+	decls  map[string]*declInfo
+	refs   map[string]map[ref]bool // callee ID -> places that use it
+	locals map[string][][]Span     // declaration ID -> the uses of each local name
+	routes map[string][]string     // handler ID -> route patterns
+	// started holds the IDs of functions started with go.
+	started map[string]bool
+}
+
+func newScan() *scan {
+	return &scan{
+		decls:   map[string]*declInfo{},
+		refs:    map[string]map[ref]bool{},
+		locals:  map[string][][]Span{},
+		routes:  map[string][]string{},
+		started: map[string]bool{},
+	}
+}
+
+func (s *scan) addRef(to string, r ref) {
+	if s.refs[to] == nil {
+		s.refs[to] = map[ref]bool{}
+	}
+	s.refs[to][r] = true
+}
+
+// Build reads the Go and TypeScript code in the repository and makes the map.
+// Go is read when the repository root holds a Go module; TypeScript and
+// JavaScript are read when the PR changes such a file.
 func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
+	s := newScan()
+	goRepo := isGoRepo(d.Root)
+	if goRepo {
+		if err := scanGo(s, d.Root, opts); err != nil {
+			return nil, err
+		}
+	}
+	if changesTS(d) {
+		if err := scanTS(s, d.Root, opts); err != nil {
+			if !goRepo {
+				return nil, err
+			}
+			// A Go repository can hold some scripts; map its Go code anyway.
+			fmt.Fprintln(os.Stderr, "map-pr: skipping TypeScript:", err)
+		}
+		if goRepo {
+			joinPackages(s)
+		}
+	}
+	return build(d, s, opts), nil
+}
+
+// joinPackages puts TypeScript and JavaScript files that sit in the folder of
+// a Go package into that package, so the map shows one package per folder.
+func joinPackages(s *scan) {
+	goPkg := map[string]string{}
+	for _, d := range s.decls {
+		if strings.HasSuffix(d.node.File, ".go") {
+			goPkg[path.Dir(d.node.File)] = d.node.Package
+		}
+	}
+	for _, d := range s.decls {
+		if p, ok := goPkg[path.Dir(d.node.File)]; ok && isTSFile(d.node.File) {
+			d.node.Package = p
+		}
+	}
+}
+
+// isGoRepo reports whether the repository root holds a Go module or workspace.
+func isGoRepo(root string) bool {
+	for _, name := range []string{"go.mod", "go.work"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// scanGo loads every Go package in the repository, with types, and adds its
+// declarations to s.
+func scanGo(s *scan, root string, opts Options) error {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
 			packages.NeedTypes | packages.NeedTypesInfo,
-		Dir:   d.Root,
+		Dir:   root,
 		Tests: opts.Tests,
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return nil, fmt.Errorf("load packages: %w", err)
+		return fmt.Errorf("load packages: %w", err)
 	}
 	packages.PrintErrors(pkgs)
 
-	funcs := map[string]*declInfo{}
-	refs := map[string]map[ref]bool{}              // callee ID -> places that use it
-	locals := map[string]map[types.Object][]Span{} // declaration ID -> local -> uses
-	routes := map[string][]string{}                // handler ID -> route patterns
-	started := map[string]bool{}                   // IDs of functions started with go
+	funcs := s.decls
 	seenFiles := map[string]bool{}
 
 	for _, pkg := range pkgs {
@@ -205,7 +304,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 				continue
 			}
 			seenFiles[path] = true
-			rel := relPath(d.Root, path)
+			rel := relPath(root, path)
 			if rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
 				// Generated files, such as a test binary's main, live outside the repository.
 				continue
@@ -240,12 +339,12 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 					switch n := n.(type) {
 					case *ast.GoStmt:
 						for _, id := range startedBy(pkg, n) {
-							started[id] = true
+							s.started[id] = true
 						}
 					case *ast.CallExpr:
 						route, fns := routeOf(pkg, n)
 						for _, id := range fns {
-							routes[id] = append(routes[id], route)
+							s.routes[id] = append(s.routes[id], route)
 						}
 					}
 					ident, ok := n.(*ast.Ident)
@@ -260,10 +359,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 					if to == from {
 						return true // skip recursion
 					}
-					if refs[to] == nil {
-						refs[to] = map[ref]bool{}
-					}
-					refs[to][ref{from: from, line: pkg.Fset.Position(ident.Pos()).Line}] = true
+					s.addRef(to, ref{from: from, line: pkg.Fset.Position(ident.Pos()).Line})
 					return true
 				})
 			}
@@ -284,7 +380,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 					if obj.Name() == "main" && decl.Recv == nil && pkg.Name == "main" {
 						funcs[id].node.Entry = &Entry{Kind: EntryMain}
 					}
-					locals[id] = localsIn(pkg, decl)
+					s.locals[id] = slices.Collect(maps.Values(localsIn(pkg, decl)))
 					// The receiver is left out: every method would otherwise use its own type.
 					collect(id, decl.Type)
 					if decl.Body != nil {
@@ -324,13 +420,19 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 			}
 		}
 	}
+	return nil
+}
+
+// build makes the map from what a scan found.
+func build(d *gitdiff.Diff, s *scan, opts Options) *Map {
+	funcs, refs, locals := s.decls, s.refs, s.locals
 
 	m := &Map{Repo: d.Root, Base: d.Base, MergeBase: d.MergeBase, Head: d.Head, Patches: d.Patches, Stats: d.Stats}
 
 	// Find the changed functions.
-	goFiles := map[string]bool{}
+	srcFiles := map[string]bool{}
 	for _, f := range funcs {
-		goFiles[f.node.File] = true
+		srcFiles[f.node.File] = true
 	}
 	var frontier []string
 	onMap := map[string]bool{}
@@ -340,19 +442,25 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 			continue
 		}
 		var changed []int
+		own := 0
 		for l := f.node.Line; l <= f.node.EndLine; l++ {
+			if f.inside(l) {
+				continue
+			}
+			own++
 			if fc.Added || fc.Lines[l] {
 				changed = append(changed, l)
 			}
 		}
 		removed := removedIn(fc, f.node.Line, f.node.EndLine)
+		maps.DeleteFunc(removed, func(l int, _ []string) bool { return f.inside(l) && f.inside(l-1) })
 		if len(changed) == 0 && len(removed) == 0 {
 			continue
 		}
 		f.node.Changed = changed
 		f.node.Removed = removed
 		f.node.Status = StatusModified
-		if len(changed) == f.node.EndLine-f.node.Line+1 && len(removed) == 0 {
+		if len(changed) == own && len(removed) == 0 {
 			f.node.Status = StatusAdded
 		}
 		onMap[f.node.ID] = true
@@ -362,7 +470,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 		switch {
 		case fc.Deleted:
 			m.Deleted = append(m.Deleted, p)
-		case !goFiles[p]:
+		case !srcFiles[p]:
 			m.OtherFiles = append(m.OtherFiles, p)
 		}
 	}
@@ -403,7 +511,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 	}
 
 	entry := func(id string) *Entry {
-		return entryOf(funcs[id], routes[id], started[id], refs[id], funcs)
+		return entryOf(funcs[id], s.routes[id], s.started[id], refs[id], funcs)
 	}
 	for id := range onMap {
 		funcs[id].node.Entry = entry(id)
@@ -443,7 +551,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 		}
 		return m.Edges[i].From < m.Edges[j].From
 	})
-	return m, nil
+	return m
 }
 
 // localsIn finds every use of each local name in a function, its receiver
@@ -494,9 +602,9 @@ func localObject(pkg *packages.Package, ident *ast.Ident) types.Object {
 
 // localGroups orders the uses of each local by place and keeps the locals
 // used more than once, in the order they are first used.
-func localGroups(byObj map[types.Object][]Span) [][]Span {
+func localGroups(uses [][]Span) [][]Span {
 	var groups [][]Span
-	for _, spans := range byObj {
+	for _, spans := range uses {
 		if len(spans) < 2 {
 			continue
 		}
@@ -830,10 +938,12 @@ func callerIDs(rs map[ref]bool, decls map[string]*declInfo) []string {
 func entryOf(d *declInfo, routes []string, started bool, rs map[ref]bool, decls map[string]*declInfo) *Entry {
 	n := d.node
 	switch {
-	case n.IsTest || (n.Kind != KindFunc && n.Kind != KindMethod):
+	case n.IsTest:
 		return nil
-	case n.Entry != nil && n.Entry.Kind == EntryMain:
+	case n.Entry != nil && (n.Entry.Kind == EntryMain || n.Entry.Kind == EntryModule):
 		return n.Entry
+	case n.Kind != KindFunc && n.Kind != KindMethod:
+		return nil
 	case d.handler || len(routes) > 0:
 		routes = slices.Clone(routes)
 		slices.Sort(routes)

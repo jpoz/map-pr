@@ -1,16 +1,18 @@
 ---
 name: map-pr
-description: Build an interactive, zoomable map of a Go pull request — the declarations it changes (functions, methods, types, constants, variables), the code that uses them, plus Claude-written themes, a guided tour, and per-declaration notes — as one HTML page. Use when the user asks to map, visualize, or explain a PR "as a map", or runs /map-pr with a PR URL, number, or nothing (current branch).
+description: Build an interactive, zoomable map of a Go or TypeScript pull request — the declarations it changes (functions, methods, types, constants, variables), the code that uses them, plus Claude-written themes, a guided tour, and per-declaration notes — as one HTML page. Use when the user asks to map, visualize, or explain a PR "as a map", or runs /map-pr with a PR URL, number, or nothing (current branch).
 argument-hint: "[PR URL | owner/repo#N | N | empty for current branch]"
 ---
 
 # map-pr
 
-`map-pr` (github.com/jpoz/map-pr) finds the changed Go declarations and their
-users with type information. You add the meaning: themes, a tour and notes.
+`map-pr` (github.com/jpoz/map-pr) finds the changed Go and TypeScript
+declarations and their users with type information. You add the meaning: themes, a tour and notes.
 map-pr puts both on one HTML page.
 
-Needs: Go, git, and `gh` (logged in) for PRs on GitHub.
+Needs: Go, git, and `gh` (logged in) for PRs on GitHub. For TypeScript or
+JavaScript: Node.js and the `typescript` package. map-pr uses the repo's own
+(run `npm ci` or the repo's install command first) or a global one.
 
 Work in `~/.cache/map-pr/<repo>-<pr>/` (call it `$OUT`). Keep private code on
 this machine: never publish the page or the notes anywhere unless the user asks.
@@ -43,17 +45,19 @@ $M -from $OUT/map.json -format outline -o $OUT/outline.txt
 (To work on map-pr itself, or before it is on a module proxy, build a checkout
 instead: `GOTOOLCHAIN=$GOV+auto go -C <checkout> build -o $OUT/bin/map-pr .`)
 
-Look at stderr: type errors mean the toolchain or modules are wrong. Fix them
+Look at stderr: type errors mean the toolchain or modules are wrong. For
+TypeScript, "cannot load the typescript package" means you must install the
+repo's dependencies, or `npm install -g typescript`. Fix them
 before you go on; a map built on broken types misses callers.
 
-If there are no changed Go declarations, tell the user and stop.
+If there are no changed Go or TypeScript declarations, tell the user and stop.
 
 ## 3. Understand the PR
 
 Read, in this order:
 1. The PR title and body (if there is one).
 2. `$OUT/outline.txt`: every changed declaration with its **key**, kind, status,
-   changed line count and users, then non-Go and deleted files.
+   changed line count and users, then other (not Go or TypeScript) and deleted files.
 3. The diff of the production code: `git -C <repo> diff <merge-base> -- <files>`.
    Start with schema/migration and query files, then the functions with the
    most callers or the most changed lines. Skip tests until the end.
@@ -90,7 +94,7 @@ Look especially for:
       "title": "4–8 words",
       "summary": "First paragraph shows on the overview. More paragraphs show when the theme is open.",
       "nodes": ["<key from outline>", "..."],
-      "files": ["non-Go files that belong to this theme"]
+      "files": ["other changed files that belong to this theme"]
     }
   ],
   "tour": [
