@@ -1,8 +1,8 @@
 # map-pr
 
-Draws a Go pull request as a map you zoom through: the declarations the branch
-changes (functions, methods, types, constants, variables), the code that uses
-them, and the entry points that reach them. With the `/map-pr` skill,
+Draws a Go or TypeScript pull request as a map you zoom through: the
+declarations the branch changes (functions, methods, types, constants,
+variables), the code that uses them, and the entry points that reach them. With the `/map-pr` skill,
 Claude adds themes, a guided tour and notes, and answers questions you drop on
 the map.
 
@@ -23,7 +23,8 @@ number in the current repo, or nothing for the current branch. (If another
 command already uses the name, the skill is `/map-pr:map-pr`.) To install
 only the skill, copy `skills/map-pr/` to `~/.claude/skills/`.
 
-The skill needs Go, git and the GitHub CLI (`gh`, logged in). It installs the
+The skill needs Go, git and the GitHub CLI (`gh`, logged in). For TypeScript
+it also needs Node.js and the `typescript` package (see below). It installs the
 `map-pr` command itself, built with the Go version of the repository it maps,
 and keeps each map in `~/.cache/map-pr/`.
 
@@ -47,6 +48,35 @@ newer Go, build it with that Go: `GOTOOLCHAIN=go1.N.M+auto go install ...`.
 | `-o` | `pr-map.html` | output file, `-` for stdout |
 | `-from` | | build from a saved `-format json` map instead of analyzing again |
 | `-notes` | | JSON with themes, a tour, and node notes to show on the page |
+
+## TypeScript and JavaScript
+
+When the PR changes a `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs` or
+`.cjs` file, map-pr also reads the repository's TypeScript and JavaScript. It
+runs a small script in Node.js with the TypeScript compiler, the way it reads
+Go with `go/types`, so a use links to its real declaration through imports.
+It uses the `typescript` package of the repository (`node_modules`), or a
+global one (`npm install -g typescript`). Each file is read with the options
+of its nearest `tsconfig.json` or `jsconfig.json`.
+
+| TypeScript | On the map |
+|---|---|
+| `function f`, `const f = () => ...` | func |
+| class, interface, type alias, enum | type |
+| class method, constructor, accessor | method, as `Class.name` |
+| other `const`, `let`, `var` | const, var |
+| top-level code that declares nothing | module, an entry point |
+| `describe("...")`, `test("...")` in a test file | module |
+
+The package of a file is the `name` in its nearest `package.json`, followed by
+the path from there. Test files are `*.test.*`, `*.spec.*` and files in
+`__tests__/`. HTTP entry points are Express-style registrations
+(`app.get("/x", handler)`) and Next.js route handlers (`app/**/route.ts`) and
+API pages (`pages/api/**`).
+
+A repository with both languages gets one map. If the PR changes a JavaScript
+file in a Go repository and the `typescript` package is missing, map-pr says so
+and maps the Go code.
 
 ## Zooming
 
@@ -81,8 +111,8 @@ most 10 users; the panel says how many more there are.
 
 An entry point is where execution starts: an HTTP handler (with its route, when
 the code registers it next to a route string such as
-`mux.HandleFunc("POST /x", h)`), `main`, a function started with `go`, or code
-with no callers outside tests (usually called through an interface). map-pr walks
+`mux.HandleFunc("POST /x", h)`), `main`, a function started with `go`, the
+top-level code of a TypeScript module, or code with no callers outside tests (usually called through an interface). map-pr walks
 up from each declaration on the map to the nearest entry points, through up to
 8 calls that are not on the map. It keeps the fewest entry points that reach
 every change, and adds those to the map with a dashed edge; the panel shows the
@@ -130,7 +160,8 @@ Opened as a file, the page has no comments.
 
 ## Limits (for now)
 
-- Go only.
-- Calls through an interface do not link to the concrete method.
+- Go, TypeScript and JavaScript only.
+- Calls through an interface do not link to the concrete method. In
+  TypeScript, a call through an interface or a function value does not link either.
 - Deleted declarations are not on the map; their files show as diffs in the panel.
 - The page loads dagre (jsdelivr) and @pierre/diffs (esm.sh) from a CDN. Offline, code shows without syntax colors.

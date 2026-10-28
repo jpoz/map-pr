@@ -1,4 +1,5 @@
-// Command map-pr draws a map of a PR: the Go functions it changes and the code that uses them.
+// Command map-pr draws a map of a PR: the Go and TypeScript functions it
+// changes and the code that uses them.
 //
 // map-pr serve, map-pr comments and map-pr reply serve a map with questions a
 // reader drops on it, list those questions, and answer them.
