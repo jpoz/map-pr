@@ -13,6 +13,7 @@ func TestCheck(t *testing.T) {
 		Patches: map[string]string{"x.sql": "@@ -1 +1 @@"},
 	}
 	n := &Notes{
+		URL:    "javascript:alert(1)",
 		Themes: []Theme{{ID: "t", Nodes: []string{"a.go:A", "a.go:Missing"}, Files: []string{"x.sql", "y.sql"}}},
 		Tour: []Step{
 			{Theme: "t", Nodes: []string{"a.go:B"}},
@@ -28,6 +29,7 @@ func TestCheck(t *testing.T) {
 		`theme t: file "y.sql" is not changed in this PR`,
 		`theme t: node "a.go:Missing" is not on the map`,
 		`tour step 2: theme "nope" does not exist`,
+		`url: "javascript:alert(1)" is not an http or https link`,
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("Check() =\n%q\nwant\n%q", got, want)

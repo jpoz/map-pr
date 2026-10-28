@@ -4,6 +4,7 @@ package notes
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/jpoz/map-pr/internal/callgraph"
@@ -11,7 +12,9 @@ import (
 
 // Notes explains a PR. Nodes are named by their callgraph key ("file:Name").
 type Notes struct {
-	Title   string            `json:"title"`
+	Title string `json:"title"`
+	// URL is the PR's web page; the page's title links to it.
+	URL     string            `json:"url,omitempty"`
 	Summary string            `json:"summary"`
 	Themes  []Theme           `json:"themes"`
 	Tour    []Step            `json:"tour"`
@@ -61,6 +64,11 @@ func (n *Notes) Check(m *callgraph.Map) []string {
 	}
 
 	var problems []string
+	if n.URL != "" {
+		if u, err := url.Parse(n.URL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			problems = append(problems, fmt.Sprintf("url: %q is not an http or https link", n.URL))
+		}
+	}
 	unknown := func(where, key string) {
 		if !keys[key] {
 			problems = append(problems, fmt.Sprintf("%s: node %q is not on the map", where, key))

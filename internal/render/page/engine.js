@@ -228,6 +228,7 @@ function ZoomMap(canvas, opts) {
     for (const p of nextPkgs.values()) {
       layoutPackage(p);
       p.changed = p.cards.filter(c => isChanged(c.node)).length;
+      p.tops = p.cards.filter(c => c.node.top).map(c => c.node);
       p.users = p.cards.length - p.changed;
       const dir = dirOf(p.cards[0].node.file);
       p.files = owner.get(dir) === p ? Object.keys(stats).filter(f => dirOf(f) === dir) : [];
@@ -679,10 +680,14 @@ function ZoomMap(canvas, opts) {
     }
     ctx.globalAlpha = 1;
   }
-  // statsParts is a package's diff summary as colored pieces: files, +added, −deleted.
-  const statsParts = p => p.files.length
-    ? [[`${p.files.length} file${p.files.length > 1 ? "s" : ""}`, C.muted], [`+${p.added}`, C.added], [`−${p.deleted}`, C.removed]]
-    : [["no changed files", C.muted]];
+  // statsParts is a package's diff summary as colored pieces: the top
+  // functions it holds (★, where to start reading), files, +added, −deleted.
+  const statsParts = p => [
+    ...(p.tops.length ? [[`★ ${p.tops.length}`, statusColor(p.tops[0].status)]] : []),
+    ...(p.files.length
+      ? [[`${p.files.length} file${p.files.length > 1 ? "s" : ""}`, C.muted], [`+${p.added}`, C.added], [`−${p.deleted}`, C.removed]]
+      : [["no changed files", C.muted]]),
+  ];
   const statsText = p => statsParts(p).map(x => x[0]).join(" ");
 
   // drawParts draws colored pieces of text on one line, aligned like fillText.
