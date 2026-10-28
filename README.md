@@ -6,8 +6,9 @@ variables), the code that uses them, and the entry points that reach them. With 
 Claude adds themes, a guided tour and notes, and answers questions you drop on
 the map.
 
-**Example:** [the map of map-pr #2](https://www.jpoz.net/map-pr/example/),
-made by `/map-pr` for one of this repository's own pull requests.
+**Example:** [the map of map-pr #5](https://www.jpoz.net/map-pr/example/),
+made by `/map-pr` for the pull request that added TypeScript. It maps both
+the Go and the JavaScript in it.
 
 ## Install
 
