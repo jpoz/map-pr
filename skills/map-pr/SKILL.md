@@ -56,7 +56,8 @@ If there are no changed Go or TypeScript declarations, tell the user and stop.
 
 Read, in this order:
 1. The PR title and body (if there is one).
-2. `$OUT/outline.txt`: every changed declaration with its **key**, kind, status,
+2. `$OUT/outline.txt`: every changed declaration (and each statement of a SQL
+   migration, as `table` or `sql`) with its **key**, kind, status,
    changed line count and users, then other (not Go or TypeScript) and deleted files.
 3. The diff of the production code: `git -C <repo> diff <merge-base> -- <files>`.
    Start with schema/migration and query files, then the functions with the
@@ -146,7 +147,7 @@ kind: pick declarations that call each other.
 
 ## 6. Serve it, and answer questions
 
-Serve the page so the reader can drop questions on it, and watch for them:
+Serve the page so the reader can chat with you about it, and watch for messages:
 
 ```sh
 $M serve -dir $OUT -addr 127.0.0.1:8770    # run in the background
@@ -155,7 +156,10 @@ $M comments -dir $OUT -watch               # watch it, e.g. with the Monitor too
 
 If port 8770 is taken, pick another and use it in the URL below.
 
-Each line from `-watch` is a new question: `[ID] <node key> line N: <text>`.
+Each line from `-watch` is a new chat message: `[ID] <node key> line N: <text>`,
+or `[ID] chat: <text>` for a message with no place on the map. The page shows
+one chat, so a message may follow up on an earlier one: read the other threads
+for context.
 For each one:
 1. Run `$M comments -dir $OUT` to see the whole thread.
 2. Read the code at that place in the repo (and the diff), not only the map.

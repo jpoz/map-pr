@@ -1,4 +1,36 @@
 "use strict";
+
+// foldPlan picks the runs of a declaration's source to fold away, as a PR
+// view folds code the change does not touch. It keeps the lines in keep
+// (changed lines, calls, the lines next to deleted ones), the first and last
+// line, and 3 lines around each kept line; a run of 8 or more other lines
+// folds. A declaration of 40 lines or fewer does not fold. It returns
+// [from, to] source lines, both included.
+function foldPlan(n, keep) {
+  const count = (n.source || "").split("\n").length;
+  if (count <= 40) return [];
+  const show = new Array(count).fill(false);
+  show[0] = show[count - 1] = true;
+  for (const l of keep) {
+    for (let i = l - n.line - 3; i <= l - n.line + 3; i++) if (i >= 0 && i < count) show[i] = true;
+  }
+  const out = [];
+  for (let i = 0; i < count;) {
+    if (show[i]) { i++; continue; }
+    let j = i;
+    while (j < count && !show[j]) j++;
+    if (j - i >= 8) out.push([n.line + i, n.line + j - 1]);
+    i = j;
+  }
+  return out;
+}
+// keepLines are the lines of n a fold keeps: changed lines, the lines around
+// deleted ones, and extra lines such as calls.
+function keepLines(n, extra = []) {
+  const keep = new Set([...(n.changed || []), ...extra]);
+  for (const l of Object.keys(n.removed || {})) { keep.add(+l); keep.add(+l - 1); }
+  return keep;
+}
 // ZoomMap draws a PR map on a canvas as one zoomable space with three levels
 // of detail: packages when zoomed out, declarations (functions, methods,
 // types, constants, variables) in the middle, and their code when zoomed in.
@@ -15,6 +47,7 @@ function ZoomMap(canvas, opts) {
     codeFont: 4.2, codeLine: 5.8, bodyPad: 6, maxLines: 140, maxCols: 110,
     cardMinW: 250, cardMaxW: 460,
     gap: 28, sectionGap: 40, sectionLabel: 30, pkgPad: 36, pkgHeader: 78, pkgRadius: 22,
+    fileLabel: 44, fileGap: 64,
   };
   // Zoom bands. Package summaries fade out while declarations fade in; a
   // card's name and code fade in when their text is readable on the screen.
@@ -72,15 +105,36 @@ function ZoomMap(canvas, opts) {
 
   // rowsOf lists the rows a card shows: its source lines, with the lines the
   // change deleted before the line they came before, as a diff shows them.
-  // no holds each row's line number, 0 on a deleted row.
+  // no holds each row's line number, 0 on a deleted row. A run of unchanged
+  // lines folds into one row with no -1; folds maps that row to its run.
+  // A fold the reader opened stays open.
   function rowsOf(n) {
     const lines = (n.source || "").replace(/\t/g, "    ").split("\n");
-    const removed = n.removed || {}, text = [], no = [];
+    const removed = n.removed || {}, text = [], no = [], folds = new Map();
+    const runs = foldPlan(n, keepLines(n, callLinesOf.get(n.id) || [])).filter(([a]) => !unfolded.has(n.id + ":" + a));
     const del = l => { for (const t of removed[l] || []) { text.push(t.replace(/\t/g, "    ")); no.push(0); } };
-    lines.forEach((t, i) => { del(n.line + i); text.push(t); no.push(n.line + i); });
+    for (let i = 0; i < lines.length; i++) {
+      const run = runs.find(([a]) => a === n.line + i);
+      if (run) {
+        folds.set(text.length, run);
+        text.push("");
+        no.push(-1);
+        i = run[1] - n.line;
+        continue;
+      }
+      del(n.line + i);
+      text.push(lines[i]);
+      no.push(n.line + i);
+    }
     del(n.line + lines.length);
-    return { text, no };
+    return { text, no, folds };
   }
+  // callLinesOf holds, for each declaration, the lines that call code on the
+  // map; a fold keeps them. unfolded holds the folds a reader opened, as
+  // "id:first line".
+  let callLinesOf = new Map();
+  const unfolded = new Set();
+  let lastData = null;
 
   // wantWidth is the width a card needs for its name and code.
   function wantWidth(n) {
@@ -97,15 +151,19 @@ function ZoomMap(canvas, opts) {
   // measure sizes a card of width w so its whole declaration fits: long or
   // wide code gets a smaller font, so it needs a deeper zoom to read.
   function measure(n, w) {
-    const { text: lines, no } = rowsOf(n);
+    const { text: lines, no, folds } = rowsOf(n);
     const cols = clamp(Math.max(...lines.map(l => l.trimEnd().length)), 24, S.maxCols);
     const gutterCols = String(n.line + lines.length).length + 2;
     const shown = Math.min(lines.length, S.maxLines);
     const font = Math.min(S.codeFont * shown / lines.length, (w - S.bodyPad * 2 - 4) / ((cols + gutterCols) * CH));
     const lh = font * S.codeLine / S.codeFont;
-    const rowOf = new Map(no.flatMap((l, i) => l ? [[l, i]] : []));
+    const rowOf = new Map(no.flatMap((l, i) => l > 0 ? [[l, i]] : []));
+    for (const [i, [a, b]] of folds) for (let l = a; l <= b; l++) rowOf.set(l, i);
+    // The header shrinks with the code font, so at the zoom that reads the
+    // code it is the same size on every card.
+    const hd = S.header * clamp(font / S.codeFont, 0.2, 1);
     return {
-      w, h: S.header + lines.length * lh + S.bodyPad * 2, lines, rowNo: no, rowOf,
+      w, h: hd + lines.length * lh + S.bodyPad * 2, hd, folds, lines, rowNo: no, rowOf,
       refs: refSpans(n, lines, rowOf), locals: localSpans(n, rowOf), font, lh, gutter: gutterCols * font * CH,
       textCols: Math.max(...lines.map(l => l.trimEnd().length)),
     };
@@ -172,10 +230,79 @@ function ZoomMap(canvas, opts) {
     return { w: cols * cardW + (cols - 1) * S.gap, h: Math.max(...heights) - S.gap };
   }
 
+  // callDepths gives each code card in a package its depth in the calls
+  // inside the package: 0 when nothing in the package calls it, else one
+  // more than its deepest caller. A call back up a cycle does not count.
+  function callDepths(p, callersOf) {
+    const inPkg = new Set(p.cards.map(c => c.id));
+    const depth = new Map(), visiting = new Set();
+    const visit = id => {
+      if (depth.has(id)) return depth.get(id);
+      visiting.add(id);
+      let d = 0;
+      for (const from of callersOf.get(id) || []) {
+        if (from !== id && inPkg.has(from) && !visiting.has(from)) d = Math.max(d, visit(from) + 1);
+      }
+      visiting.delete(id);
+      depth.set(id, d);
+      return d;
+    };
+    for (const c of p.cards) visit(c.id);
+    return depth;
+  }
+
+  // Constants, variables and types go in a lane below the code of their file.
+  const isValue = n => n.kind === "const" || n.kind === "var" || n.kind === "type" || n.kind === "sql";
+
+  // layoutFiles places one section's cards as a block per file, the blocks
+  // side by side in shelves no wider than maxCols columns. In a block, the
+  // code comes first, callers before the code they call, then the values.
+  // It returns the size and the file labels, at block-local places.
+  function layoutFiles(list, maxCols, cardW, depth) {
+    const files = new Map();
+    for (const c of list) {
+      if (!files.has(c.node.file)) files.set(c.node.file, []);
+      files.get(c.node.file).push(c);
+    }
+    const byLine = (a, b) => a.node.line - b.node.line;
+    const byDepth = (a, b) => depth.get(a.id) - depth.get(b.id) || byLine(a, b);
+    const colsFor = cs => {
+      const area = cs.reduce((s, c) => s + (cardW + S.gap) * (c.h + S.gap), 0);
+      return clamp(Math.round(Math.sqrt(area * 1.6) / (cardW + S.gap)), 1, Math.min(maxCols, cs.length));
+    };
+    const blocks = [...files.keys()].sort().map(file => {
+      const cs = files.get(file);
+      const code = cs.filter(c => !isValue(c.node)).sort(byDepth);
+      const values = cs.filter(c => isValue(c.node)).sort(byLine);
+      const cols = colsFor(cs);
+      let y = S.fileLabel, w = 0;
+      for (const lane of [code, values].filter(l => l.length)) {
+        const box = masonry(lane, Math.min(cols, lane.length), cardW);
+        for (const c of lane) c.ly += y;
+        y += box.h + S.gap;
+        w = Math.max(w, box.w);
+      }
+      return { file, cards: cs, w, h: y - S.gap };
+    });
+    // Shelves: blocks left to right, a new shelf when the next one does
+    // not fit.
+    const maxW = maxCols * (cardW + S.gap) - S.gap;
+    const labels = [];
+    let x = 0, y = 0, shelfH = 0, w = 0;
+    for (const b of blocks) {
+      if (x > 0 && x + b.w > maxW) { x = 0; y += shelfH + S.sectionGap; shelfH = 0; }
+      for (const c of b.cards) { c.lx += x; c.ly += y; }
+      labels.push({ label: `${b.file.split("/").pop()} · ${b.cards.length}`, lx: x, ly: y + 24, file: true });
+      x += b.w + S.fileGap;
+      w = Math.max(w, x - S.fileGap);
+      shelfH = Math.max(shelfH, b.h);
+    }
+    return { w, h: y + shelfH, labels };
+  }
+
   // A package lists its changed declarations first, then the code that uses
-  // them, each in file and line order.
-  function layoutPackage(p) {
-    const byPos = (a, b) => a.node.file.localeCompare(b.node.file) || a.node.line - b.node.line;
+  // them, each grouped by file.
+  function layoutPackage(p, callersOf) {
     const groups = [
       ["Entry points", p.cards.filter(c => c.node.status === "entry")],
       ["Changed", p.cards.filter(c => isChanged(c.node))],
@@ -186,25 +313,45 @@ function ZoomMap(canvas, opts) {
     const cardW = wants[Math.floor((wants.length - 1) * 0.9)];
     for (const c of p.cards) Object.assign(c, measure(c.node, cardW));
     const area = p.cards.reduce((s, c) => s + (cardW + S.gap) * (c.h + S.gap), 0);
-    // Aim for a package about 1.6 times as wide as it is tall.
-    const cols = clamp(Math.round(Math.sqrt(area * 1.6) / (cardW + S.gap)), 1, p.cards.length);
     const headerW = Math.max(p.name.length * 24 * CH, p.path.length * 12 * CH) + 150;
-    let y = S.pkgHeader, w = headerW;
-    p.sections = [];
-    for (const [label, list] of groups) {
-      list.sort(byPos);
-      p.sections.push({ label: `${label.toUpperCase()} · ${list.length}`, ly: y + 12 });
-      y += S.sectionLabel;
-      const box = masonry(list, Math.min(cols, list.length), cardW);
-      for (const c of list) { c.lx += S.pkgPad; c.ly += y; }
-      y += box.h + S.sectionGap;
-      w = Math.max(w, box.w);
+    const depth = callDepths(p, callersOf);
+    // place lays the sections out with at most cols columns.
+    const place = cols => {
+      let y = S.pkgHeader, w = headerW;
+      const sections = [];
+      for (const [label, list] of groups) {
+        sections.push({ label: `${label.toUpperCase()} · ${list.length}`, lx: 0, ly: y + 12 });
+        y += S.sectionLabel;
+        const box = layoutFiles(list, cols, cardW, depth);
+        for (const c of list) { c.lx += S.pkgPad; c.ly += y; }
+        for (const l of box.labels) sections.push({ ...l, ly: l.ly + y });
+        y += box.h + S.sectionGap;
+        w = Math.max(w, box.w);
+      }
+      return { w: w + S.pkgPad * 2, h: y - S.sectionGap + S.pkgPad, sections };
+    };
+    // Aim for a package about 1.6 times as wide as it is tall. File blocks
+    // leave gaps in their shelves, so try a few column counts from the one
+    // the cards' area asks for and keep the best.
+    const want = clamp(Math.round(Math.sqrt(area * 1.6) / (cardW + S.gap)), 1, p.cards.length);
+    const off = r => Math.abs(Math.log(r.w / r.h / 1.6));
+    let best = want;
+    for (let cols = want, r0 = null; cols <= Math.min(p.cards.length, want * 2); cols++) {
+      const r = place(cols);
+      if (!r0 || off(r) < off(r0)) { r0 = r; best = cols; }
     }
-    p.w = w + S.pkgPad * 2;
-    p.h = y - S.sectionGap + S.pkgPad;
+    Object.assign(p, place(best));
   }
 
   function layout(data) {
+    const byNode = new Map(data.nodes.map(n => [n.id, n]));
+    callLinesOf = new Map();
+    for (const e of data.edges) {
+      const n = byNode.get(e.from);
+      if (!n) continue;
+      const lines = (e.lines || []).filter(l => l >= n.line && l <= n.endLine);
+      if (lines.length) callLinesOf.set(n.id, [...(callLinesOf.get(n.id) || []), ...lines]);
+    }
     const nextCards = new Map(), nextPkgs = new Map();
     for (const n of data.nodes) {
       const c = { id: n.id, node: n, dim: 1, fade: 1 };
@@ -225,8 +372,13 @@ function ZoomMap(canvas, opts) {
       const dir = dirOf(p.cards[0].node.file);
       if (!owner.has(dir) || owner.get(dir).path.endsWith("_test")) owner.set(dir, p);
     }
+    const callersOf = new Map();
+    for (const e of data.edges) {
+      if (!callersOf.has(e.to)) callersOf.set(e.to, []);
+      callersOf.get(e.to).push(e.from);
+    }
     for (const p of nextPkgs.values()) {
-      layoutPackage(p);
+      layoutPackage(p, callersOf);
       p.changed = p.cards.filter(c => isChanged(c.node)).length;
       p.tops = p.cards.filter(c => c.node.top).map(c => c.node);
       p.users = p.cards.length - p.changed;
@@ -302,6 +454,7 @@ function ZoomMap(canvas, opts) {
   // setData lays the map out. With animate, cards and packages move from
   // their old places to the new ones; new cards fade in and old ones out.
   function setData(data, animate) {
+    lastData = data;
     const old = { cards, pkgs };
     const next = layout(data);
     if (animate && old.cards.size) {
@@ -423,8 +576,8 @@ function ZoomMap(canvas, opts) {
   }
 
   // showCode flies to a card close enough to read its code. A long card is
-  // shown from its top.
-  function showCode(id) {
+  // shown from its top, or around line when one is given.
+  function showCode(id, line) {
     const c = cards.get(id);
     if (!c) return;
     const r = finalRect(c);
@@ -432,7 +585,9 @@ function ZoomMap(canvas, opts) {
     // view is shown from its top left, where the code starts.
     const z = clamp(fitZoom(r, 40), 11 / c.font, 14 / c.font);
     const x = r.w * z > W - 80 ? r.x + (W / 2 - 40) / z : r.x + r.w / 2;
-    const y = r.h * z > H - 80 ? r.y + (H / 2 - 40) / z : r.y + r.h / 2;
+    const y = r.h * z <= H - 80 ? r.y + r.h / 2
+      : line ? clamp(r.y + c.hd + S.bodyPad + (rowOf(c, line) + 0.5) * c.lh, r.y + (H / 2 - 40) / z, r.y + r.h - (H / 2 - 40) / z)
+      : r.y + (H / 2 - 40) / z;
     flyTo({ x, y, z });
   }
 
@@ -449,11 +604,12 @@ function ZoomMap(canvas, opts) {
   // ---------- emphasis ----------
 
   // updateEmphasis sets how strongly each card and package is drawn: a
-  // selection or a focus dims everything else.
+  // selection or a focus dims everything else. A selection inside a focus,
+  // as in a walk, keeps both lit.
   function updateEmphasis() {
     let keep = null, keepPkg = null;
     if (selected) {
-      keep = new Set([selected]);
+      keep = new Set([selected, ...(focus && focus.ids || [])]);
       for (const e of edges) {
         if (e.from === selected) keep.add(e.to);
         if (e.to === selected) keep.add(e.from);
@@ -656,9 +812,14 @@ function ZoomMap(canvas, opts) {
       ctx.font = `600 12px ${SANS}`;
       drawParts(statsParts(p), p.x + p.w - S.pkgPad, p.y + 42, "right");
       ctx.fillStyle = C.muted;
-      ctx.font = `600 11px ${SANS}`;
+      // A file label is big enough to read among the cards, so it fades out
+      // when the code is zoomed in close.
+      const fileA = 1 - smooth(32, 56, 20 * z);
       for (const s of p.sections) {
-        ctx.fillText(s.label, p.x + S.pkgPad, p.y + s.ly + 4);
+        if (s.file && fileA < 0.01) continue;
+        ctx.globalAlpha = a * textA * (s.file ? fileA : 1);
+        ctx.font = s.file ? `600 20px ${MONO}` : `600 11px ${SANS}`;
+        ctx.fillText(s.label, p.x + S.pkgPad + s.lx, p.y + s.ly + 4);
       }
     }
     // A package that opens while small on the screen gets a header in
@@ -870,7 +1031,7 @@ function ZoomMap(canvas, opts) {
   const scrollOf = c => clamp(c.scroll || 0, 0, maxScroll(c));
   // rowOf is the row of a card that shows a source line.
   const rowOf = (c, line) => c.rowOf.get(line) ?? clamp(line - c.node.line, 0, c.lines.length - 1);
-  const lineY = (c, line) => c.y + S.header + S.bodyPad + (rowOf(c, line) + 0.5) * c.lh;
+  const lineY = (c, line) => c.y + c.hd + S.bodyPad + (rowOf(c, line) + 0.5) * c.lh;
 
   // edgePath runs from the user to the declaration it uses. When the user's
   // code is readable, the edge starts at the line that makes the call.
@@ -990,23 +1151,23 @@ function ZoomMap(canvas, opts) {
     // The code area and the status stripe.
     ctx.fillStyle = C.codeBg;
     ctx.beginPath();
-    ctx.roundRect(c.x + 1 / z, c.y + S.header, c.w - 2 / z, c.h - S.header - 1 / z, [0, 0, r, r]);
+    ctx.roundRect(c.x + 1 / z, c.y + c.hd, c.w - 2 / z, c.h - c.hd - 1 / z, [0, 0, r, r]);
     ctx.fill();
     ctx.fillStyle = statusColor(n.status);
     ctx.beginPath();
-    ctx.roundRect(c.x, c.y, 5, c.h, [r, 0, 0, r]);
+    ctx.roundRect(c.x, c.y, 5 * c.hd / S.header, c.h, [r, 0, 0, r]);
     ctx.fill();
 
     if (c.h * z > 18) drawBody(c, a);
 
-    const nameA = smooth(NAME_PX[0], NAME_PX[1], S.nameFont * z);
+    const nameA = smooth(NAME_PX[0], NAME_PX[1], S.nameFont * z * c.hd / S.header);
     if (nameA > 0.01) {
       // Deep in, the header text stops growing at 26 pixels and stays
       // centered in its band, so it does not crowd out the code.
-      const hs = Math.min(1, 26 / (S.nameFont * z));
+      const k = c.hd / S.header, hs = k * Math.min(1, 26 / (S.nameFont * z * k));
       ctx.globalAlpha = a * nameA;
       ctx.save();
-      ctx.translate(c.x, c.y + S.header / 2);
+      ctx.translate(c.x, c.y + c.hd / 2);
       ctx.scale(hs, hs);
       ctx.translate(0, -S.header / 2);
       drawHeader(n, c.w / hs, z * hs);
@@ -1016,7 +1177,41 @@ function ZoomMap(canvas, opts) {
     // screen shows it in screen pixels, cut to fit.
     const compactA = (1 - nameA) * smooth(34, 56, sw) * smooth(12, 18, c.h * z);
     if (compactA > 0.01) drawCompactName(c, a * compactA);
+    if (nameA > 0.5) drawStickyName(c, a);
     ctx.globalAlpha = 1;
+  }
+
+  // drawStickyName keeps a card's name in view while its header is scrolled
+  // above the top of the screen and its code still shows, so a reader deep in
+  // a long function always sees which one it is.
+  function drawStickyName(c, alpha) {
+    const z = cam.z, bandH = 26;
+    if (sy(c.y + c.hd) > 0 || sy(c.y + c.h) < bandH * 2 || sy(c.y) > H) return;
+    const x = Math.max(sx(c.x), 0), w = Math.min(sx(c.x + c.w), W) - x;
+    if (w < 60) return;
+    const y = Math.min(0, sy(c.y + c.h) - bandH);
+    setScreen();
+    ctx.globalAlpha = alpha * 0.96;
+    ctx.fillStyle = C.panel;
+    ctx.fillRect(x, y, w, bandH);
+    ctx.fillStyle = statusColor(c.node.status);
+    ctx.fillRect(x, y, 3, bandH);
+    ctx.fillStyle = C.line;
+    ctx.fillRect(x, y + bandH - 1, w, 1);
+    ctx.globalAlpha = alpha;
+    ctx.textBaseline = "middle";
+    ctx.font = `600 10px ${SANS}`;
+    ctx.fillStyle = C.muted;
+    const kind = (c.node.kind || "func").toUpperCase();
+    ctx.fillText(kind, x + 12, y + bandH / 2);
+    const kx = x + 12 + ctx.measureText(kind).width + 8;
+    ctx.font = `600 13px ${MONO}`;
+    ctx.fillStyle = C.ink;
+    let text = c.node.name;
+    const maxW = w - (kx - x) - 12, tw = ctx.measureText(text).width;
+    if (tw > maxW) text = ellipsize(text, Math.floor(text.length * maxW / tw));
+    ctx.fillText(text, kx, y + bandH / 2);
+    setWorld();
   }
 
   function drawCompactName(c, alpha) {
@@ -1030,7 +1225,7 @@ function ZoomMap(canvas, opts) {
     let text = (c.node.top ? "★ " : "") + c.node.name;
     const w = ctx.measureText(text).width;
     if (w > maxW) text = ellipsize(text, Math.floor(text.length * maxW / w));
-    ctx.fillText(text, x, sy(c.y) + Math.max(S.header * z / 2, 7));
+    ctx.fillText(text, x, sy(c.y) + Math.max(c.hd * z / 2, 7));
     setWorld();
   }
 
@@ -1116,7 +1311,7 @@ function ZoomMap(canvas, opts) {
   // something on the map are marked at every size.
   function drawBody(c, a) {
     const n = c.node, z = cam.z;
-    const top = c.y + S.header + S.bodyPad, lh = c.lh;
+    const top = c.y + c.hd + S.bodyPad, lh = c.lh;
     const x0 = c.x + 5, w0 = c.w - 5 - 1 / z;
     const changed = n.changed || [];
     ctx.globalAlpha = a;
@@ -1136,6 +1331,20 @@ function ZoomMap(canvas, opts) {
       ctx.fillStyle = C.hl;
       for (const l of c.callLines) ctx.fillRect(x0 + 2, top + rowOf(c, l) * lh, w0 - 2, lh + 0.01);
     }
+    // A folded run of unchanged lines is a band that says how many lines it
+    // holds; a click opens it.
+    for (const [i, [from, to]] of c.folds) {
+      const y = top + i * lh;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = hoverFold && hoverFold.card === c && hoverFold.row === i ? C.callerBg : C.pkgBg;
+      ctx.fillRect(x0, y, w0, lh);
+      if (c.font * z > 4) {
+        ctx.fillStyle = C.muted;
+        ctx.font = `${c.font}px ${MONO}`;
+        ctx.textBaseline = "middle";
+        ctx.fillText(`⋯ ${to - from + 1} unchanged lines (${from}–${to}) · click to show`, c.x + S.bodyPad + 4, y + lh / 2);
+      }
+    }
     const px = c.font * z;
     if (px < 0.5 || c.h * z < 24) return;
     const toks = tokens.get(c.id) ?? (px > 0.7 ? wantTokens(c) : null);
@@ -1145,13 +1354,13 @@ function ZoomMap(canvas, opts) {
     const maxX = c.x + c.w - S.bodyPad;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(c.x, c.y + S.header, c.w, c.h - S.header);
+    ctx.rect(c.x, c.y + c.hd, c.w, c.h - c.hd);
     ctx.clip();
     if (codeA < 1) {
       const m = minimap(c, toks);
       if (m) {
         ctx.globalAlpha = a * (1 - codeA);
-        ctx.drawImage(m.canvas, c.x, c.y + S.header, c.w, c.h - S.header);
+        ctx.drawImage(m.canvas, c.x, c.y + c.hd, c.w, c.h - c.hd);
       }
     }
     if (codeA > 0) {
@@ -1163,15 +1372,21 @@ function ZoomMap(canvas, opts) {
       ctx.fillStyle = C.muted;
       ctx.textAlign = "right";
       for (let i = first; i < last; i++) {
-        ctx.fillStyle = c.rowNo[i] ? C.muted : C.removed;
+        if (c.rowNo[i] < 0) continue;
+        const on = hoverLine && hoverLine.card === c && hoverLine.row === i;
+        ctx.fillStyle = on ? C.note : c.rowNo[i] ? C.muted : C.removed;
         ctx.fillText(c.rowNo[i] ? String(c.rowNo[i]) : "−", left - cw, top + (i + 0.5) * lh);
+        if (on) {
+          const tw = ctx.measureText(String(c.rowNo[i])).width;
+          ctx.fillRect(left - cw - tw, top + (i + 0.5) * lh + c.font * 0.6, tw, Math.max(c.font * 0.08, 1 / cam.z));
+        }
       }
       ctx.textAlign = "left";
       // The code scrolls sideways under the line numbers, which stay put.
       const scroll = scrollOf(c), ox = left - scroll;
       if (scroll > 0) {
         ctx.beginPath();
-        ctx.rect(left - cw * 0.5, c.y + S.header, c.x + c.w - (left - cw * 0.5), c.h - S.header);
+        ctx.rect(left - cw * 0.5, c.y + c.hd, c.x + c.w - (left - cw * 0.5), c.h - c.hd);
         ctx.clip();
       }
       if (hoverRef && hoverRef.card === c) {
@@ -1270,7 +1485,7 @@ function ZoomMap(canvas, opts) {
   const minimaps = new Map();
   let minimapPixels = 0, minimapDeadline = 0;
   function minimap(c, toks) {
-    const bodyH = c.h - S.header;
+    const bodyH = c.h - c.hd;
     const want = Math.pow(2, Math.ceil(Math.log2(Math.max(cam.z * dpr, 1 / 16))));
     const scale = Math.min(want, 4, 2048 / c.w, 4096 / bodyH);
     let m = minimaps.get(c.id);
@@ -1457,13 +1672,16 @@ function ZoomMap(canvas, opts) {
     const found = pick(x0, y0);
     if (found.card) {
       const c = found.card, n = c.node;
-      const top = c.y + S.header + S.bodyPad;
+      const top = c.y + c.hd + S.bodyPad;
       let line = 0;
       if (c.lh * cam.z >= 4 && y >= top) {
         // A deleted row has no line of its own; it is asked about at the line it came before.
         let i = clamp(Math.floor((y - top) / c.lh), 0, c.lines.length - 1);
-        while (i < c.lines.length - 1 && !c.rowNo[i]) i++;
-        line = c.rowNo[i] || n.endLine;
+        if (c.folds.has(i)) line = c.folds.get(i)[0];
+        else {
+          while (i < c.lines.length - 1 && !(c.rowNo[i] > 0)) i++;
+          line = c.rowNo[i] > 0 ? c.rowNo[i] : n.endLine;
+        }
       }
       return { node: c.id, line };
     }
@@ -1490,6 +1708,33 @@ function ZoomMap(canvas, opts) {
   // refAt is the name under a screen point that refers to another
   // declaration, when the card's code is open enough to read.
   let hoverRef = null;
+  // foldAt is the folded row under the pointer, if any.
+  let hoverFold = null;
+  function foldAt(c, sx0, sy0) {
+    if (!c.folds.size || c.lh * cam.z < 3) return null;
+    const [, y] = toWorld(sx0, sy0);
+    const row = Math.floor((y - (c.y + c.hd + S.bodyPad)) / c.lh);
+    return c.folds.has(row) ? { card: c, row, run: c.folds.get(row) } : null;
+  }
+  // unfold opens a folded run and lays the map out again around it.
+  function unfold(c, run) {
+    unfolded.add(c.id + ":" + run[0]);
+    // Its rows changed, so its colors and minimap are made again.
+    tokens.delete(c.id);
+    minimaps.delete(c.id);
+    setData(lastData, true);
+    markCallLines();
+  }
+  // lineNoAt is the line number under the pointer, when the page can take
+  // questions and the card's code is open enough to read.
+  let canAsk = false, hoverLine = null;
+  function lineNoAt(c, sx0, sy0) {
+    if (!canAsk || codeAlpha(c) < 0.5) return null;
+    const [x, y] = toWorld(sx0, sy0);
+    if (x < c.x + S.bodyPad || x > codeLeft(c) - c.font * CH * 0.5) return null;
+    const row = Math.floor((y - (c.y + c.hd + S.bodyPad)) / c.lh);
+    return c.rowNo[row] > 0 ? { card: c, row, line: c.rowNo[row] } : null;
+  }
   function refAt(c, sx0, sy0) {
     const hit = spanAt(c, c.refs, sx0, sy0);
     return hit && { card: c, row: hit.row, c0: hit.span.c0, c1: hit.span.c1, to: hit.span.to };
@@ -1505,7 +1750,7 @@ function ZoomMap(canvas, opts) {
   function spanAt(c, spans, sx0, sy0) {
     if (!spans.size || codeAlpha(c) < 0.5) return null;
     const [x, y] = toWorld(sx0, sy0);
-    const top = c.y + S.header + S.bodyPad, left = codeLeft(c), cw = c.font * CH;
+    const top = c.y + c.hd + S.bodyPad, left = codeLeft(c), cw = c.font * CH;
     if (x < left) return null;
     const row = Math.floor((y - top) / c.lh), col = Math.floor((x - left + scrollOf(c)) / cw);
     const span = (spans.get(row) || []).find(r => col >= r.c0 && col < r.c1);
@@ -1600,6 +1845,16 @@ function ZoomMap(canvas, opts) {
     const found = pick(e.offsetX, e.offsetY);
     const id = found.card ? found.card.id : null;
     if (id !== hover) { hover = id; request(); }
+    const fold = found.card && !commentMode ? foldAt(found.card, e.offsetX, e.offsetY) : null;
+    if ((fold && fold.card.id + fold.row) !== (hoverFold && hoverFold.card.id + hoverFold.row)) { hoverFold = fold; request(); }
+    const lineNo = found.card && !commentMode && !fold ? lineNoAt(found.card, e.offsetX, e.offsetY) : null;
+    if ((lineNo && lineNo.card.id + lineNo.row) !== (hoverLine && hoverLine.card.id + hoverLine.row)) { hoverLine = lineNo; request(); }
+    if (lineNo) {
+      if (hoverRef || hoverLocal) { hoverRef = null; hoverLocal = null; request(); }
+      canvas.style.cursor = "pointer";
+      opts.onTip?.({ title: `Ask about line ${lineNo.line}`, sub: lineNo.card.node.name, x: e.offsetX, y: e.offsetY });
+      return;
+    }
     const ref = found.card && !commentMode ? refAt(found.card, e.offsetX, e.offsetY) : null;
     if (!sameRef(ref, hoverRef)) { hoverRef = ref; request(); }
     const local = found.card && !commentMode && !ref ? localAt(found.card, e.offsetX, e.offsetY) : null;
@@ -1633,6 +1888,10 @@ function ZoomMap(canvas, opts) {
       const port = portAt(e.offsetX, e.offsetY);
       if (port) { if (port.edges.length === 1) opts.onNode?.(port.edges[0].from, true); drag = null; return; }
       const found = pick(e.offsetX, e.offsetY);
+      const fold = found.card ? foldAt(found.card, e.offsetX, e.offsetY) : null;
+      if (fold) { unfold(found.card, fold.run); drag = null; return; }
+      const lineNo = found.card ? lineNoAt(found.card, e.offsetX, e.offsetY) : null;
+      if (lineNo) { opts.onTip?.(null); opts.onLine?.(found.card.id, lineNo.line); drag = null; return; }
       const ref = found.card ? refAt(found.card, e.offsetX, e.offsetY) : null;
       if (ref) opts.onRef?.(ref.to);
       else if (found.card) opts.onNode?.(found.card.id);
@@ -1644,7 +1903,7 @@ function ZoomMap(canvas, opts) {
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointerleave", () => {
-    if (!drag && (hover || hoverRef || hoverPort || hoverLocal)) { hover = null; hoverRef = null; hoverPort = null; hoverLocal = null; request(); }
+    if (!drag && (hover || hoverRef || hoverPort || hoverLocal || hoverLine)) { hover = null; hoverRef = null; hoverPort = null; hoverLocal = null; hoverLine = null; request(); }
     opts.onTip?.(null);
     opts.onPort?.(null);
   });
@@ -1752,6 +2011,7 @@ function ZoomMap(canvas, opts) {
     setPins(list) { notePins = list; request(); },
     setActivePin(id) { activePin = id; request(); },
     setCommentMode(on) { commentMode = on; canvas.style.cursor = on ? "crosshair" : "grab"; },
+    setCanAsk(on) { canAsk = on; },
     get camera() { return { ...cam }; },
     get level() { return lastLevel; },
     get drawMs() { return drawMs; },

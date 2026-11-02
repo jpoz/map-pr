@@ -37,6 +37,7 @@ const md = s => String(s || "").trim().split(/\n\s*\n/).map(p => "<p>" + esc(p)
 const shortPkg = p => p.split("/").slice(-2).join("/");
 const shortRef = r => /^[0-9a-f]{40}$/.test(r) ? r.slice(0, 7) : r;
 const isChange = n => n.status === "added" || n.status === "modified";
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 const kindOf = n => n.kind || "func";
 const code = nodes.filter(n => !n.isTest);
 const tests = nodes.filter(n => n.isTest);
@@ -143,11 +144,13 @@ const map = ZoomMap(document.getElementById("map"), {
   // A name in a card's code that refers to another declaration goes to it:
   // its card when it is on the map, else its definition in the panel.
   refsOf: id => (USES[id] || []).flatMap(u => declOf(u.to) ? [{ to: u.to, name: identName(declOf(u.to)), lines: u.lines }] : []),
-  onRef: to => byId[to] ? selectNode(to) : showDef(to),
+  onRef: to => refTo(to),
   onPackage: pkg => selectPackage(pkg),
   onBackground: () => { if (location.hash) home({ fly: false }); },
-  onPin: id => showThread(id),
-  onDrop: anchor => { setCommentMode(false); newComment(anchor); },
+  onPin: id => { goToThread(id); focusThread(id); },
+  onDrop: anchor => { setCommentMode(false); attachTo(anchor); },
+  // A click on a line number in a card's code attaches that line to a chat message.
+  onLine: (id, line) => attachTo({ node: id, line }),
   onLevel: level => {
     for (const b of document.querySelectorAll("[data-level]")) b.classList.toggle("on", b.dataset.level === level);
   },
@@ -210,20 +213,35 @@ function mapData() {
 
 // codeBlock shows a declaration's source with the lines the change deleted
 // before the line they came before. A deleted row has no .no or .code cell,
-// so those cells stay one per source line.
-function codeBlock(n, highlight = []) {
+// so those cells stay one per source line. marks numbers the lines of a
+// walk's calls: line to call index. With fold, long runs of unchanged lines
+// hide behind a row that shows them on a click, as a PR view does; the
+// hidden rows stay in the block, so the cells still match source lines.
+function codeBlock(n, highlight = [], marks = new Map(), fold = true) {
   const changed = new Set(n.changed || []);
   const hl = new Set(highlight);
   const removed = n.removed || {};
   const del = no => (removed[no] || []).map(text =>
     `<span class="ln del"><span class="gone">−</span><span class="old">${esc(text)}</span></span>`).join("");
   const lines = n.source.split("\n");
+  const runs = fold ? foldPlan(n, keepLines(n, [...highlight, ...marks.keys()])) : [];
+  const runOf = no => runs.findIndex(([a, b]) => no >= a && no <= b);
   return `<pre class="src" data-node="${esc(n.id)}">` + lines.map((text, i) => {
-    const no = n.line + i;
-    const cls = [changed.has(no) && "chg", hl.has(no) && "hl"].filter(Boolean).join(" ");
-    return del(no) + `<span class="ln ${cls}"><span class="no">${no}</span><span class="code">${esc(text)}</span></span>`;
+    const no = n.line + i, r = runOf(no);
+    const cls = [changed.has(no) && "chg", (hl.has(no) || marks.has(no)) && "hl", r >= 0 && "folded"].filter(Boolean).join(" ");
+    const mark = marks.has(no) ? ` data-call="${marks.get(no)}"` : "";
+    const num = marks.has(no) ? `<span class="call-n">${circled(marks.get(no))}</span>` : "";
+    const head = r >= 0 && runs[r][0] === no
+      ? `<span class="ln fold" data-fold="${r}">⋯ ${runs[r][1] - no + 1} unchanged lines (${no}–${runs[r][1]}) · click to show</span>` : "";
+    return head + del(no) + `<span class="ln ${cls}"${mark}${r >= 0 ? ` data-in="${r}"` : ""}><span class="no">${no}</span>${num}<span class="code">${esc(text)}</span></span>`;
   }).join("") + del(n.line + lines.length) + "</pre>";
 }
+
+// srcHead is the header on top of a source block: the declaration's name and
+// place. It sticks to the top of the panel, so a long function keeps its
+// name in view.
+const srcHead = (d, extra = "") =>
+  `<div class="src-path"><span class="kind">${esc(kindOf(d))}</span> <b>${esc(d.name)}</b> · ${esc(d.file)}:${d.line}${extra}</div>`;
 
 const badge = n => `<span class="badge ${n.status}">${statusLabel(n)}</span>`;
 const kindTag = n => `<span class="kind">${kindOf(n)}</span>`;
@@ -330,6 +348,11 @@ function linkRefs(pre) {
 
 // openDecl shows a declaration: on the map if it is there, else its definition.
 const openDecl = id => byId[id] ? selectNode(id) : showDef(id);
+// refTo follows a name in code. In a walk, a call steps into it.
+function refTo(id) {
+  const i = walkPath ? callsOf(walkPath[walkPath.length - 1]).findIndex(c => c.to === id) : -1;
+  if (i >= 0) stepInto(i); else openDecl(id);
+}
 
 // showDef shows the definition of code the PR does not change, with the
 // declarations on this map that use it.
@@ -337,6 +360,7 @@ function showDef(id) {
   const d = DEFS[id];
   if (!d) return;
   tourStep = -1;
+  walkPath = null;
   const users = usersOfDecl(id).filter(x => declOf(x));
   const total = d.endLine - d.line + 1, shown = d.source.split("\n").length;
   setPanel(`
@@ -347,8 +371,8 @@ function showDef(id) {
     <h3>Used here by</h3>
     ${linkList(users.map(x => [x, `<span class="name">${byId[x] ? badge(byId[x]) + " " : ""}<span class="kind">${esc(declOf(x).kind)}</span> ${esc(declOf(x).name)}</span> <span class="loc">${esc(declOf(x).file)}</span>`]))}
     <h3>Definition</h3>
-    <div class="src-path">${esc(d.file)}:${d.line}</div>
-    ${codeBlock(d)}
+    ${srcHead(d)}
+    ${codeBlock(d, [], new Map(), false)}
     ${shown < total ? `<p class="empty">The first ${shown} of ${total} lines. The rest is in the file.</p>` : ""}`);
   record("def=" + id);
 }
@@ -377,14 +401,21 @@ async function highlightCode(pre) {
 
 const panel = document.getElementById("panel");
 panel.addEventListener("click", e => {
+  const fold = e.target.closest(".ln.fold");
+  if (fold) {
+    const pre = fold.closest("pre");
+    for (const ln of pre.querySelectorAll(`.ln[data-in="${fold.dataset.fold}"]`)) ln.classList.remove("folded");
+    fold.remove();
+    return;
+  }
   const ref = e.target.closest(".ref");
-  if (ref) { e.preventDefault(); openDecl(ref.dataset.ref); }
+  if (ref) { e.preventDefault(); refTo(ref.dataset.ref); }
 });
 
 // setPanel fills the side panel. A wide panel gives diffs room in a step
 // that shows only files.
 function setPanel(html, wide = false) {
-  if (!/data-resolve/.test(html)) { openThread = null; map.setActivePin(null); }
+  map.setActivePin(null);
   panel.classList.toggle("wide", wide);
   panel.innerHTML = html;
   panel.scrollTop = 0;
@@ -396,20 +427,21 @@ function setPanel(html, wide = false) {
   for (const b of panel.querySelectorAll("[data-step]")) b.onclick = () => showStep(+b.dataset.step);
   for (const b of panel.querySelectorAll("[data-home]")) b.onclick = () => home();
   for (const b of panel.querySelectorAll("[data-code]")) b.onclick = () => map.showCode(b.dataset.code);
+  for (const b of panel.querySelectorAll("[data-walk]")) b.onclick = () => walkFrom(b.dataset.walk);
   for (const b of panel.querySelectorAll("[data-entries]")) b.onclick = () => {
     const ids = entries.map(x => x.n.id);
     map.select(null);
     map.setFocus({ ids, color: cssVar("--entry") });
     map.showIds(ids);
   };
-  for (const li of panel.querySelectorAll("li[data-thread]")) li.onclick = () => showThread(li.dataset.thread, { fly: true });
-  for (const b of panel.querySelectorAll("[data-ask]")) b.onclick = () => newComment({ node: b.dataset.ask, line: 0 });
+  for (const li of panel.querySelectorAll("li[data-thread]")) li.onclick = () => focusThread(li.dataset.thread);
+  for (const b of panel.querySelectorAll("[data-ask]")) b.onclick = () => attachTo({ node: b.dataset.ask, line: 0 });
   if (comments.on) {
     for (const pre of panel.querySelectorAll("pre.src[data-node]")) {
       pre.classList.add("askable");
       pre.querySelectorAll(".no").forEach(no => {
-        no.title = "Ask about this line";
-        no.onclick = () => newComment({ node: pre.dataset.node, line: +no.textContent });
+        no.title = "Ask Claude about this line";
+        no.onclick = () => attachTo({ node: pre.dataset.node, line: +no.textContent });
       });
     }
   }
@@ -463,6 +495,7 @@ function showNode(id) {
     <span class="back" data-home>← Overview</span>
     <h2>${kindTag(n)} ${esc(n.name)}</h2>
     ${badge(n)} ${entryPill(n)} ${exported}
+    ${isCode(n) && !n.isTest ? `<div class="tour-nav"><button class="primary" data-walk="${esc(id)}">${n.entry ? "Walk from here" : "Walk the path to here"} →</button></div>` : ""}
     <div class="loc">${esc(n.package)}<br>${esc(n.file)}:${n.line}</div>
     ${note ? `<div class="note">${md(note)}</div>` : ""}
     ${themes ? `<h3>Part of</h3><ul class="links themes">${themes}</ul>` : ""}
@@ -481,7 +514,7 @@ function showNode(id) {
     ${comments.on ? `<h3>Questions <button class="mini" data-ask="${esc(id)}">Ask about this</button></h3>
     <div class="questions" data-for="${esc(n.key)}">${threadList(threadsAt(n.key))}</div>` : ""}
     <h3>Source <button class="mini" data-code="${esc(id)}">Zoom to code</button></h3>
-    <div class="src-path">${esc(n.file)}:${n.line}${comments.on ? ` <span class="hint">· click a line number to ask about it</span>` : ""}</div>
+    ${srcHead(n, comments.on ? ` <span class="hint">· click a line number to ask Claude about it</span>` : "")}
     ${codeBlock(n, uses.flatMap(e => e.lines || []))}`);
 }
 
@@ -489,6 +522,7 @@ function showNode(id) {
 // it with its neighbors; a click on the map leaves the camera alone.
 function selectNode(id, { fly = true } = {}) {
   tourStep = -1;
+  walkPath = null;
   ensureShown([id]);
   map.setFocus(null);
   map.select(id);
@@ -499,9 +533,181 @@ function selectNode(id, { fly = true } = {}) {
   record("node=" + byId[id].key);
 }
 
+// ---------- walk ----------
+
+// A walk follows one path of calls through the change, the way a debugger
+// steps into calls: from an entry point, each function lists the calls it
+// makes into code on the map, in source order, and the reader steps into
+// one. walkPath holds the functions from the start of the walk to the
+// current one; walkCursor is the chosen call of the current one.
+let walkPath = null, walkCursor = 0;
+const isCode = n => !["const", "var", "type", "sql"].includes(kindOf(n));
+
+// callsOf lists the calls a function makes into code on the map, one per
+// callee, in the order of the first line that calls it. Calls that go
+// through code not on the map, from an entry point, come last.
+function callsOf(id) {
+  const out = new Map();
+  for (const e of edges) {
+    if (e.from !== id || !byId[e.to] || byId[e.to].isTest || !isCode(byId[e.to])) continue;
+    const c = out.get(e.to) || { to: e.to, lines: [], via: e.via };
+    c.lines.push(...(e.lines || []));
+    out.set(e.to, c);
+  }
+  const first = c => c.lines.length ? Math.min(...c.lines) : Infinity;
+  return [...out.values()].sort((a, b) => first(a) - first(b) || byId[a.to].name.localeCompare(byId[b.to].name));
+}
+
+// pathFromEntry finds the shortest chain of calls from an entry point to id,
+// or null. An entry point with real callers outside the map (HTTP, go, main)
+// wins over one that only has no callers.
+function pathFromEntry(id) {
+  const parent = new Map([[id, null]]), queue = [id], found = [];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (byId[cur].entry) found.push(cur);
+    for (const e of edges) {
+      if (e.to !== cur || parent.has(e.from) || byId[e.from].isTest) continue;
+      parent.set(e.from, cur);
+      queue.push(e.from);
+    }
+  }
+  const start = found.find(x => byId[x].entry.kind !== "root") || found[0];
+  if (!start) return null;
+  const path = [];
+  for (let x = start; x; x = parent.get(x)) path.push(x);
+  return path;
+}
+
+// changeIn says how much of a callee the PR changes.
+const changeIn = t => t.status === "added" ? "new in this PR"
+  : t.status === "modified" ? `${(t.changed || []).length} of ${t.endLine - t.line + 1} lines changed in it`
+  : "not changed; it calls changed code";
+// isNewCall says whether the PR wrote the call itself, or only changed the
+// code it calls.
+const isNewCall = (n, c) => c.lines.some(l => (n.changed || []).includes(l));
+
+const circled = i => i < 20 ? String.fromCodePoint(0x2460 + i) : `(${i + 1})`;
+
+function showWalk(path, cursor = 0) {
+  tourStep = -1;
+  walkPath = path;
+  const id = path[path.length - 1], n = byId[id];
+  const calls = callsOf(id);
+  walkCursor = clamp(cursor, 0, Math.max(0, calls.length - 1));
+  ensureShown(path);
+  map.setFocus({ ids: path, color: cssVar("--entry") });
+  map.select(id);
+  map.showCode(id, calls[walkCursor] && Math.min(...calls[walkCursor].lines));
+
+  const note = noteOf(n);
+  const trail = path.map((x, i) => `<li data-walk-to="${i}" class="${i === path.length - 1 ? "here" : ""}">` +
+    `${i ? "<span class=\"arrow\">↳</span> " : ""}${i === 0 ? entryPill(byId[x]) + " " : ""}<span class="name">${esc(byId[x].name)}</span></li>`).join("");
+  // When the walk does not start at an entry point, offer the path from one,
+  // or else the callers to step back to.
+  const head = byId[path[0]];
+  const fromEntry = head.entry ? null : pathFromEntry(path[0]);
+  const callers = head.entry ? [] : edges.filter(e => e.to === path[0] && !byId[e.from].isTest);
+  const start = fromEntry
+    ? `<div class="walk-start"><p class="empty">This walk does not start at an entry point. Execution reaches it from
+       ${entryPill(byId[fromEntry[0]])} <b>${esc(byId[fromEntry[0]].name)}</b>, ${fromEntry.length - 1} call${fromEntry.length === 2 ? "" : "s"} up.</p>
+       <button data-walk-entry>Walk from ${esc(byId[fromEntry[0]].name)}</button></div>`
+    : !head.entry && callers.length ? `<div class="walk-start"><p class="empty">Called by:</p>${linkList(callers.map(e =>
+      [e.from, `<span class="name">${kindTag(byId[e.from])} ${esc(byId[e.from].name)}</span> <span class="loc">${esc(byId[e.from].file)}</span>`]))}</div>` : "";
+
+  const rows = calls.map((c, i) => {
+    const t = byId[c.to], reach = changesReached(c.to).length, again = path.includes(c.to);
+    const at = c.via ? `through ${c.via.length ? c.via.map(esc).join(" → ") : "a direct call"}` : `line ${[...new Set(c.lines)].sort((a, b) => a - b).join(", ")}`;
+    const call = c.via ? "" : isNewCall(n, c) ? `<span class="call-kind new">new call</span>` : `<span class="call-kind">existing call</span>`;
+    return `<li data-call="${i}" class="${i === walkCursor ? "cur" : ""}"><span class="num">${circled(i)}</span><div>` +
+      `<span class="name">${kindTag(t)} ${esc(t.name)}</span> ${call}` +
+      `<div class="loc">${at} · ${changeIn(t)}${reach ? ` · reaches ${reach} more change${reach === 1 ? "" : "s"}` : ""}${again ? " · already on this path" : ""}</div>` +
+      (noteOf(t) ? `<div class="note small">${md(noteOf(t))}</div>` : "") + `</div></li>`;
+  }).join("");
+  const marks = new Map();
+  calls.forEach((c, i) => { for (const l of c.lines) if (!marks.has(l)) marks.set(l, i); });
+
+  setPanel(`
+    <span class="back" data-home>← Overview</span>
+    <div class="walk-head"><span class="count">Walk · ${path.length} deep</span>
+      <button data-walk-out ${path.length < 2 ? "disabled" : ""}>← Out</button>
+      <button class="primary" data-walk-in ${calls.length ? "" : "disabled"}>Into ${calls.length ? circled(walkCursor) : ""} →</button></div>
+    <ol class="trail">${trail}</ol>
+    ${start}
+    <h2>${kindTag(n)} ${esc(n.name)}</h2>
+    ${badge(n)} ${entryPill(n)}
+    <div class="loc">${esc(n.file)}:${n.line}</div>
+    ${n.entry && path.length === 1 ? `<p class="empty">${esc(entryText(n.entry))}</p>` : ""}
+    ${note ? `<div class="note">${md(note)}</div>` : ""}
+    <h3>Calls into the change, in order</h3>
+    ${calls.length
+      ? `<ol class="calls">${rows}</ol><p class="hint">↑ ↓ choose a call · → or Enter step into it · ← step out · or click a call in the code</p>`
+      : `<p class="empty">It calls no more code on the map: this path ends here. Press ← to go back and take another call.</p>`}
+    <h3>Source</h3>
+    ${srcHead(n)}
+    ${codeBlock(n, [], marks)}`);
+  for (const li of panel.querySelectorAll("li[data-call]")) {
+    li.onclick = () => stepInto(+li.dataset.call);
+    li.onmouseenter = () => markCall(+li.dataset.call, false);
+  }
+  for (const li of panel.querySelectorAll("li[data-walk-to]")) li.onclick = () => showWalk(walkPath.slice(0, +li.dataset.walkTo + 1));
+  for (const li of panel.querySelectorAll(".walk-start li[data-id]")) li.onclick = () => showWalk([li.dataset.id, ...walkPath]);
+  const b = sel => panel.querySelector(sel);
+  if (b("[data-walk-entry]")) b("[data-walk-entry]").onclick = () => showWalk([...fromEntry.slice(0, -1), ...walkPath]);
+  b("[data-walk-out]").onclick = stepOut;
+  b("[data-walk-in]").onclick = () => stepInto(walkCursor);
+  // A call line says why it is marked: the call may be old, with the change
+  // inside the code it calls.
+  for (const ln of panel.querySelectorAll("pre.src .ln[data-call]")) {
+    const c = calls[+ln.dataset.call], t = byId[c.to];
+    ln.title = `${circled(+ln.dataset.call)} calls ${t.name}: ${changeIn(t)}. ` +
+      (isNewCall(n, c) ? "This PR adds or changes this call." : "This line did not change; the change is inside the code it calls.");
+  }
+  markCall(walkCursor, false);
+  record("walk=" + path.map(x => byId[x].key).join(" > "));
+}
+
+// markCall chooses a call: its row and its lines in the source light up.
+function markCall(i, scroll = true) {
+  if (!walkPath) return;
+  walkCursor = i;
+  for (const li of panel.querySelectorAll("li[data-call]")) li.classList.toggle("cur", +li.dataset.call === i);
+  let first = null;
+  for (const ln of panel.querySelectorAll("pre.src .ln[data-call]")) {
+    const on = +ln.dataset.call === i;
+    ln.classList.toggle("on", on);
+    if (on && !first) first = ln;
+  }
+  const into = panel.querySelector("[data-walk-in]");
+  if (into && !into.disabled) into.textContent = `Into ${circled(i)} →`;
+  if (scroll && first) {
+    first.scrollIntoView({ block: "nearest" });
+    map.showCode(walkPath[walkPath.length - 1], +first.querySelector(".no").textContent);
+  }
+}
+
+function stepInto(i) {
+  const calls = callsOf(walkPath[walkPath.length - 1]);
+  if (!calls[i]) return;
+  showWalk([...walkPath, calls[i].to]);
+}
+
+// stepOut goes back to the caller, with the call it came from chosen.
+function stepOut() {
+  if (!walkPath || walkPath.length < 2) return;
+  const from = walkPath[walkPath.length - 1], path = walkPath.slice(0, -1);
+  showWalk(path, callsOf(path[path.length - 1]).findIndex(c => c.to === from));
+}
+
+// walkFrom starts a walk at id: from its entry point when it has one.
+function walkFrom(id) {
+  showWalk(byId[id].entry ? [id] : pathFromEntry(id) || [id]);
+}
+
 function showTheme(themeId) {
   const t = themeById[themeId];
   tourStep = -1;
+  walkPath = null;
   const ids = (t.nodes || []).map(k => idOf[k]).filter(Boolean);
   ensureShown(ids);
   map.select(null);
@@ -523,6 +729,7 @@ function showStep(i) {
   const steps = NOTES.tour;
   if (i < 0 || i >= steps.length) return;
   tourStep = i;
+  walkPath = null;
   const s = steps[i];
   const t = themeById[s.theme];
   const ids = (s.nodes || []).map(k => idOf[k]).filter(Boolean);
@@ -551,6 +758,7 @@ function showStep(i) {
 
 function home({ fly = true } = {}) {
   tourStep = -1;
+  walkPath = null;
   map.select(null);
   map.setFocus(null);
   if (fly) map.fit();
@@ -562,6 +770,7 @@ function home({ fly = true } = {}) {
 // what changed in it.
 function selectPackage(pkg) {
   tourStep = -1;
+  walkPath = null;
   const ns = nodes.filter(n => n.package === pkg && (testsToggle.checked || !n.isTest));
   if (!ns.length) return home();
   map.select(null);
@@ -608,8 +817,9 @@ function route() {
     else if (kind === "theme" && themeById[value]) showTheme(value);
     else if (kind === "node" && idOf[value]) selectNode(idOf[value]);
     else if (kind === "pkg" && nodes.some(n => n.package === value)) selectPackage(value);
-    else if (kind === "thread" && comments.threads.some(t => t.id === value)) showThread(value, { fly: true });
+    else if (kind === "thread" && comments.threads.some(t => t.id === value)) { goToThread(value); focusThread(value); }
     else if (kind === "def" && DEFS[value]) showDef(value);
+    else if (kind === "walk" && value.split(" > ").every(k => idOf[k])) showWalk(value.split(" > ").map(k => idOf[k]));
     else home();
   } finally {
     restoring = false;
@@ -640,20 +850,19 @@ function showSummary() {
   setPanel(`
     ${NOTES.summary ? `<div class="prose">${md(NOTES.summary)}</div>` : ""}
     ${NOTES.tour.length ? `<div class="tour-nav"><button class="primary" data-step="0">Start the tour (${NOTES.tour.length} steps) →</button></div>` : ""}
-    ${startHere}
-    ${comments.on && comments.threads.length ? `<h3>Questions</h3><div class="questions" data-for="">${threadList(comments.threads)}</div>` : ""}
-    ${themes ? `<h3>Themes</h3><ul class="links themes">${themes}</ul>` : ""}
-    ${entries.length ? `<h3>Entry points · start here <button class="mini" data-entries>Show on map</button></h3>
-    <p class="empty">Where execution starts and reaches the changes, most changes first.</p>
+    ${entries.length ? `<h3>Walk the code <button class="mini" data-entries>Show on map</button></h3>
+    <p class="empty">Where execution starts and reaches the changes, most changes first. Pick one to step through its calls into the change, one function at a time.</p>
     <ul class="links">${entryGroups.map(group => {
       const row = ({ n, reach }, more) => `<span class="name">${entryPill(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
-        ` <span class="loc">${n.entry.kind === "http" && n.entry.routes ? esc(n.entry.routes[0]) + " · " : ""}reaches ${reach} change${reach === 1 ? "" : "s"}${more}</span>`;
+        ` <span class="loc">${n.entry.kind === "http" && n.entry.routes ? esc(n.entry.routes[0]) : esc(n.file)} · reaches ${reach} change${reach === 1 ? "" : "s"}${more}</span>`;
       const [first, ...rest] = group;
-      if (!rest.length) return `<li data-id="${esc(first.n.id)}">${row(first, "")}</li>`;
-      return `<li class="group"><div data-id="${esc(first.n.id)}">${row(first, "")}</div>
+      if (!rest.length) return `<li data-walk="${esc(first.n.id)}">${row(first, "")}</li>`;
+      return `<li class="group"><div data-walk="${esc(first.n.id)}">${row(first, "")}</div>
         <details><summary>${rest.length} more ${first.n.entry.kind === "http" ? "routes" : "entry points"} that reach the same changes</summary>
-        <ul class="links">${rest.map(x => `<li data-id="${esc(x.n.id)}">${row(x, "")}</li>`).join("")}</ul></details></li>`;
+        <ul class="links">${rest.map(x => `<li data-walk="${esc(x.n.id)}">${row(x, "")}</li>`).join("")}</ul></details></li>`;
     }).join("")}</ul>` : ""}
+    ${startHere}
+    ${themes ? `<h3>Themes</h3><ul class="links themes">${themes}</ul>` : ""}
     <h3>Changed code</h3>
     ${changes(code)}
     ${tests.some(isChange) ? `<h3>Changed tests</h3>${changes(tests)}` : ""}
@@ -663,17 +872,20 @@ function showSummary() {
 
 // ---------- comments ----------
 
-// When `map-pr serve` serves the page, a reader can drop questions anywhere on
-// the map and Claude answers them with `map-pr reply`. The threads live in
-// comments.json next to the page. Opened as a file, the page has no comments.
+// When `map-pr serve` serves the page, a chat with Claude runs down its left
+// side. A message can carry a place on the map: a line, a declaration, a
+// package or a point. Each message the reader sends is a thread in
+// comments.json, and Claude answers it with `map-pr reply`. Opened as a file,
+// the page has no chat.
 const comments = { on: false, threads: [], sig: "" };
 let commentMode = false;
-let openThread = null;
 const commentBtn = document.getElementById("comment-btn");
 
 const threadState = t => t.resolved ? "resolved" : t.messages[t.messages.length - 1].author === "claude" ? "answered" : "open";
 const threadsAt = key => comments.threads.filter(t => t.anchor.node === key);
 const when = at => new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+// placed is true for a thread with a place on the map; a plain chat message has none.
+const placed = a => !!(a.node || a.package || a.x || a.y);
 
 async function api(path, body) {
   const res = await fetch(path, body
@@ -686,33 +898,26 @@ async function api(path, body) {
 // apiAnchor turns the map's anchor (node IDs) into a stored one (node keys,
 // which stay the same when the map is built again).
 function apiAnchor(a) {
+  if (!a) return {};
   if (a.node) return { node: byId[a.node].key, line: a.line || 0 };
   if (a.pkg) return { package: a.pkg };
   return { x: a.x, y: a.y };
 }
 
-function anchorLabel(a) {
-  if (a.node) {
-    const n = byId[idOf[a.node]];
-    if (!n) return `<span class="loc">${esc(a.node)} (not on this map)</span>`;
-    return `<span class="name" data-goto="${esc(n.id)}">${kindTag(n)} ${esc(n.name)}</span>` +
-      ` <span class="loc">${esc(n.file)}${a.line ? ":" + a.line : ""}</span>`;
-  }
-  if (a.package) return `<span class="name">package ${esc(shortPkg(a.package))}</span>`;
-  return `<span class="name">a point on the map</span>`;
+// anchorShort names an anchor in a few words: a declaration and line, a package, or a point.
+const anchorShort = a => a.node ? a.node.split(":").pop() + (a.line ? ":" + a.line : "") : a.package ? "package " + shortPkg(a.package) : "a point on the map";
+
+// lineText is the source of an anchored line, for the chip that shows it.
+function lineText(a) {
+  const n = a.node && byId[idOf[a.node]];
+  if (!n || !a.line) return "";
+  return (n.source.split("\n")[a.line - n.line] || "").trim();
 }
 
-// excerpt shows the lines around an anchored line, or the start of the declaration.
-function excerpt(a) {
-  const n = a.node && byId[idOf[a.node]];
-  if (!n) return "";
-  const lines = n.source.split("\n");
-  const at = a.line ? a.line - n.line : 0;
-  const from = Math.max(0, at - 3), to = Math.min(lines.length, a.line ? at + 4 : 8);
-  return `<pre class="excerpt">` + lines.slice(from, to).map((text, i) => {
-    const no = n.line + from + i;
-    return `<span class="ln ${a.line === no ? "hl" : ""}"><span class="no">${no}</span>${esc(text)}</span>`;
-  }).join("") + `</pre>`;
+function chipHTML(a, attrs = "") {
+  const code = lineText(a);
+  return `<span class="att" ${attrs} title="Go to this place on the map"><span class="where">${esc(anchorShort(a))}</span>` +
+    (code ? `<code>${esc(code)}</code>` : "") + `</span>`;
 }
 
 function threadList(ts) {
@@ -720,16 +925,8 @@ function threadList(ts) {
   return `<ul class="links">${ts.map(t => {
     const first = t.messages[0].body;
     return `<li data-thread="${esc(t.id)}"><span class="state ${threadState(t)}">${threadState(t)}</span> ` +
-      `${esc(first.length > 90 ? first.slice(0, 89) + "…" : first)}<div class="loc">${t.anchor.node ? esc(t.anchor.node.split(":").pop()) + (t.anchor.line ? ":" + t.anchor.line : "") : t.anchor.package ? esc(shortPkg(t.anchor.package)) : "map"} · ${t.messages.length} message${t.messages.length > 1 ? "s" : ""}</div></li>`;
+      `${esc(first.length > 90 ? first.slice(0, 89) + "…" : first)}<div class="loc">${esc(anchorShort(t.anchor))} · ${t.messages.length} message${t.messages.length > 1 ? "s" : ""}</div></li>`;
   }).join("")}</ul>`;
-}
-
-function messagesHTML(t) {
-  const state = threadState(t);
-  return t.messages.map(m => `<div class="msg ${m.author === "claude" ? "claude" : "you"}">
-      <div class="who">${m.author === "claude" ? "Claude" : "You"} <span>${when(m.at)}</span></div>
-      <div class="prose">${md(m.body)}</div></div>`).join("") +
-    (state === "open" ? `<p class="waiting">Waiting for Claude. Answers show here when they come.</p>` : "");
 }
 
 function setCommentMode(on) {
@@ -739,115 +936,212 @@ function setCommentMode(on) {
   document.getElementById("stage").classList.toggle("commenting", on);
 }
 
-// newComment opens a box to write a question at an anchor from the map.
-function newComment(anchor) {
-  const a = apiAnchor(anchor);
-  tourStep = -1;
+// ---------- chat ----------
+
+const chat = {
+  el: document.getElementById("chat"), log: document.getElementById("chat-log"),
+  box: document.getElementById("chat-input"), attachEl: document.getElementById("chat-attach"),
+  btn: document.getElementById("chat-btn"), toast: document.getElementById("toast"),
+  attach: null, seen: null, timer: 0,
+};
+const seenKey = "map-pr:seen:" + location.pathname;
+const pageTitle = document.title;
+const answersIn = t => t.messages.filter(m => m.author === "claude").length;
+const unread = t => !!chat.seen && answersIn(t) > (chat.seen[t.id] || 0);
+// plain is the first line of Markdown text, without its marks.
+const plain = text => (text.split("\n").find(l => l.trim()) || "").replace(/[`*]/g, "").trim();
+const chatOpen = () => !chat.el.hidden;
+
+// attachTo puts a place on the map on the message being written, and opens
+// the chat to write it.
+function attachTo(anchor) {
+  chat.attach = anchor;
   if (anchor.node) map.select(anchor.node);
-  setPanel(`
-    <span class="back" data-home>← Overview</span>
-    <h2>New question</h2>
-    <div class="anchor">${anchorLabel(a)}</div>
-    ${excerpt(a)}
-    <textarea id="compose" rows="5" placeholder="Ask about this code. Claude gets it in the session that serves this map."></textarea>
-    <div class="tour-nav"><span class="count">⌘↵ to send</span><button data-cancel>Cancel</button><button class="primary" data-send>Send</button></div>
-    <p class="error" hidden></p>`);
-  const box = panel.querySelector("#compose");
-  box.focus();
-  const send = async () => {
-    if (!box.value.trim()) return;
-    try {
-      const t = await api("api/threads", { anchor: a, body: box.value });
-      await loadThreads(true);
-      showThread(t.id);
-    } catch (err) {
-      showError(err);
-    }
-  };
-  panel.querySelector("[data-send]").onclick = send;
-  panel.querySelector("[data-cancel]").onclick = () => anchor.node ? selectNode(anchor.node, { fly: false }) : home({ fly: false });
-  box.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); };
+  setChat(true);
+  renderAttach();
+  chat.box.focus();
 }
 
-function showError(err) {
-  const p = panel.querySelector(".error");
-  if (p) { p.textContent = String(err.message || err); p.hidden = false; }
+function renderAttach() {
+  const a = chat.attach && apiAnchor(chat.attach);
+  chat.attachEl.hidden = !a;
+  chat.attachEl.innerHTML = a ? chipHTML(a, "data-goto-attach") + `<button class="x" title="Remove">×</button>` : "";
+  if (!a) return;
+  chat.attachEl.querySelector(".x").onclick = () => { chat.attach = null; renderAttach(); chat.box.focus(); };
+  chat.attachEl.querySelector("[data-goto-attach]").onclick = () => goToAnchor(a);
 }
 
-// showThread shows a question with its answers and a box to reply.
-function showThread(id, { fly = false } = {}) {
+async function sendChat() {
+  const body = chat.box.value;
+  if (!body.trim()) return;
+  chat.box.disabled = true;
+  try {
+    await api("api/threads", { anchor: apiAnchor(chat.attach), body });
+    chat.box.value = "";
+    chat.attach = null;
+    renderAttach();
+    await loadThreads(true);
+    chat.log.scrollTop = chat.log.scrollHeight;
+  } catch (err) {
+    chatError(err);
+  } finally {
+    chat.box.disabled = false;
+    chat.box.focus();
+  }
+}
+
+function chatError(err) {
+  const p = chat.el.querySelector(".error");
+  p.textContent = String(err.message || err);
+  p.hidden = false;
+  setTimeout(() => { p.hidden = true; }, 6000);
+}
+
+// renderChat draws every message in time order. An answer that does not come
+// right after its question quotes it.
+function renderChat() {
+  const items = comments.threads.flatMap(t => t.messages.map((m, i) => ({ t, m, i })))
+    .sort((a, b) => a.m.at.localeCompare(b.m.at));
+  const atEnd = chat.log.scrollHeight - chat.log.scrollTop - chat.log.clientHeight < 40;
+  let prev = null;
+  chat.log.innerHTML = items.length ? items.map(({ t, m, i }) => {
+    const claude = m.author === "claude";
+    const quote = claude && prev !== t.id ? `<div class="quote" data-jump="${esc(t.id)}">↪ ${esc(plain(t.messages[0].body))}</div>` : "";
+    const chip = !claude && i === 0 && placed(t.anchor) ? chipHTML(t.anchor, `data-pin="${esc(t.id)}"`) : "";
+    const fresh = claude && unread(t) && i >= t.messages.length - (answersIn(t) - (chat.seen[t.id] || 0)) ? " fresh" : "";
+    const waiting = !claude && i === t.messages.length - 1 && threadState(t) === "open" ? `<div class="waiting">Waiting for Claude…</div>` : "";
+    prev = t.id;
+    return `<div class="msg ${claude ? "claude" : "you"}${fresh}" ${i === 0 ? `data-thread="${esc(t.id)}"` : ""}>
+      <div class="who">${claude ? "Claude" : "You"} <span>${when(m.at)}</span></div>${quote}${chip}
+      <div class="prose">${md(m.body)}</div>${waiting}</div>`;
+  }).join("") : `<p class="empty">Ask Claude about this pull request. Click a line number on the map or in the panel to attach that line to your question.</p>`;
+  for (const c of chat.log.querySelectorAll("[data-pin]")) c.onclick = () => goToThread(c.dataset.pin);
+  for (const q of chat.log.querySelectorAll("[data-jump]")) q.onclick = () => focusThread(q.dataset.jump);
+  if (atEnd) chat.log.scrollTop = chat.log.scrollHeight;
+}
+
+// goToAnchor shows a stored anchor on the map.
+function goToAnchor(a) {
+  const n = a.node && byId[idOf[a.node]];
+  if (n) {
+    selectNode(n.id, { fly: false });
+    map.showCode(n.id, a.line || 0);
+  } else if (a.package) selectPackage(a.package);
+}
+
+// goToThread takes the map back to the place a message is about.
+function goToThread(id) {
   const t = comments.threads.find(t => t.id === id);
   if (!t) return;
-  tourStep = -1;
-  openThread = id;
-  map.setActivePin(id);
   const n = t.anchor.node && byId[idOf[t.anchor.node]];
-  map.select(n ? n.id : null);
-  if (fly) map.showPin(id);
-  setPanel(`
-    <span class="back" data-home>← Overview</span>
-    <h2>Question</h2>
-    <div class="anchor">${anchorLabel(t.anchor)}</div>
-    ${excerpt(t.anchor)}
-    <div class="thread">${messagesHTML(t)}</div>
-    <textarea id="compose" rows="3" placeholder="Reply"></textarea>
-    <div class="tour-nav"><span class="count">⌘↵ to send</span>
-      <button data-resolve>${t.resolved ? "Reopen" : "Resolve"}</button><button class="primary" data-send>Reply</button></div>
-    <p class="error" hidden></p>`);
-  const box = panel.querySelector("#compose");
-  const send = async () => {
-    if (!box.value.trim()) return;
-    try {
-      await api(`api/threads/${id}/messages`, { body: box.value });
-      box.value = "";
-      await loadThreads(true);
-    } catch (err) {
-      showError(err);
-    }
-  };
-  panel.querySelector("[data-send]").onclick = send;
-  box.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); };
-  panel.querySelector("[data-resolve]").onclick = async () => {
-    try {
-      await api(`api/threads/${id}/resolve`, { resolved: !comments.threads.find(t => t.id === id).resolved });
-      await loadThreads(true);
-    } catch (err) {
-      showError(err);
-    }
-  };
-  const goto = panel.querySelector("[data-goto]");
-  if (goto) goto.onclick = () => selectNode(goto.dataset.goto);
+  if (n) selectNode(n.id, { fly: false });
+  else if (t.anchor.package) selectPackage(t.anchor.package);
+  map.setActivePin(id);
+  map.showPin(id);
   record("thread=" + id);
 }
 
-// refreshComments updates what is on screen after the threads change, but
-// leaves a reply being written alone.
+// focusThread scrolls the chat to a question and marks it for a moment.
+function focusThread(id) {
+  setChat(true);
+  const el = chat.log.querySelector(`[data-thread="${CSS.escape(id)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("flash");
+  void el.offsetWidth;
+  el.classList.add("flash");
+}
+
+function setChat(open) {
+  chat.el.hidden = !open;
+  chat.btn.classList.toggle("on", open);
+  try { localStorage.setItem("map-pr:chat", open ? "open" : "closed"); } catch {}
+  map.resize();
+  if (open) { hideToast(); renderChat(); markSeen(); }
+  refreshBadge();
+}
+
+// ---------- read state ----------
+// What this viewer has read is kept in the browser as the count of Claude's
+// messages seen in each thread. While the chat is open and the tab is shown,
+// answers are read when they come.
+
+function loadSeen() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(seenKey)); } catch {}
+  chat.seen = saved || Object.fromEntries(comments.threads.map(t => [t.id, answersIn(t)]));
+  if (!saved) saveSeen();
+}
+function saveSeen() {
+  try { localStorage.setItem(seenKey, JSON.stringify(chat.seen)); } catch {}
+}
+function markSeen() {
+  if (!chatOpen() || document.hidden) return;
+  clearTimeout(chat.timer);
+  // The "new" mark stays a moment, so the reader sees which answers came.
+  chat.timer = setTimeout(() => {
+    for (const t of comments.threads) chat.seen[t.id] = answersIn(t);
+    saveSeen();
+    for (const m of chat.log.querySelectorAll(".msg.fresh")) m.classList.remove("fresh");
+    refreshBadge();
+  }, 4000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) markSeen(); });
+
+function refreshBadge() {
+  const n = comments.threads.filter(unread).length;
+  const badge = chat.btn.querySelector(".badge");
+  badge.hidden = !n;
+  badge.textContent = n;
+  document.title = n ? `(${n}) ${pageTitle}` : pageTitle;
+}
+
+function showToast(t, count) {
+  chat.toast.innerHTML = `<b>${count > 1 ? `${count} new answers` : "Claude answered"}</b><span>${esc(plain(t.messages[0].body))}</span>`;
+  chat.toast.hidden = false;
+  clearTimeout(chat.toastTimer);
+  chat.toastTimer = setTimeout(hideToast, 12000);
+}
+function hideToast() { chat.toast.hidden = true; }
+chat.toast.onclick = () => { setChat(true); chat.log.scrollTop = chat.log.scrollHeight; };
+
+// refreshComments updates the pins and the chat after the threads change.
 function refreshComments() {
-  map.setPins(comments.threads.map(t => ({
+  map.setPins(comments.threads.filter(t => placed(t.anchor)).map(t => ({
     id: t.id, node: t.anchor.node ? idOf[t.anchor.node] || "missing" : null, line: t.anchor.line || 0,
     pkg: t.anchor.package || null, x: t.anchor.x || 0, y: t.anchor.y || 0,
     state: threadState(t), count: t.messages.length,
   })));
-  const thread = panel.querySelector(".thread");
-  const t = openThread && comments.threads.find(t => t.id === openThread);
-  if (thread && t) {
-    thread.innerHTML = messagesHTML(t);
-    panel.querySelector("[data-resolve]").textContent = t.resolved ? "Reopen" : "Resolve";
-  }
+  if (chatOpen()) renderChat();
   for (const q of panel.querySelectorAll(".questions")) {
-    q.innerHTML = threadList(q.dataset.for ? threadsAt(q.dataset.for) : comments.threads);
-    for (const li of q.querySelectorAll("li[data-thread]")) li.onclick = () => showThread(li.dataset.thread, { fly: true });
+    q.innerHTML = threadList(threadsAt(q.dataset.for));
+    for (const li of q.querySelectorAll("li[data-thread]")) li.onclick = () => focusThread(li.dataset.thread);
   }
+  refreshBadge();
 }
 
 async function loadThreads(force = false) {
   const ts = await api("api/threads");
   const sig = JSON.stringify(ts);
   if (!force && sig === comments.sig) return;
+  const before = new Map(comments.threads.map(t => [t.id, answersIn(t)]));
   comments.sig = sig;
   comments.threads = ts;
+  if (!chat.seen) loadSeen();
   refreshComments();
+  // A hidden tab does not poll, so a thread can come with its question and
+  // answer at once.
+  const fresh = ts.filter(t => answersIn(t) > (before.get(t.id) ?? 0) && unread(t));
+  if (fresh.length && !chatOpen()) showToast(fresh[fresh.length - 1], fresh.length);
+  if (fresh.length) markSeen();
 }
+
+chat.btn.onclick = () => setChat(!chatOpen());
+document.getElementById("chat-close").onclick = () => setChat(false);
+chat.box.onkeydown = e => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
+  if (e.key === "Escape") chat.box.blur();
+};
 
 async function startComments() {
   if (!location.protocol.startsWith("http")) return;
@@ -857,8 +1151,13 @@ async function startComments() {
     return; // a plain file server: no comments API
   }
   comments.on = true;
+  map.setCanAsk(true);
   commentBtn.hidden = false;
   commentBtn.onclick = () => setCommentMode(!commentMode);
+  chat.btn.hidden = false;
+  let saved = null;
+  try { saved = localStorage.getItem("map-pr:chat"); } catch {}
+  setChat(saved !== "closed");
   route(); // show the comment parts of the current view, or open a #thread= link
   setInterval(() => { if (!document.hidden) loadThreads().catch(() => {}); }, 2500);
 }
@@ -867,10 +1166,21 @@ async function startComments() {
 
 document.addEventListener("keydown", evt => {
   if (evt.target.closest("input, textarea") || evt.metaKey || evt.ctrlKey) return;
+  if (walkPath) {
+    const n = callsOf(walkPath[walkPath.length - 1]).length;
+    const keys = {
+      ArrowDown: () => n && markCall((walkCursor + 1) % n), j: () => n && markCall((walkCursor + 1) % n),
+      ArrowUp: () => n && markCall((walkCursor + n - 1) % n), k: () => n && markCall((walkCursor + n - 1) % n),
+      ArrowRight: () => stepInto(walkCursor), Enter: () => stepInto(walkCursor), l: () => stepInto(walkCursor),
+      ArrowLeft: stepOut, Backspace: stepOut, h: stepOut,
+    };
+    if (keys[evt.key]) { evt.preventDefault(); keys[evt.key](); return; }
+  }
   if (evt.key === "ArrowRight" && NOTES.tour.length) showStep(tourStep + 1);
   if (evt.key === "ArrowLeft" && tourStep > 0) showStep(tourStep - 1);
   if (evt.key === "Escape") { if (commentMode) setCommentMode(false); else home(); }
   if ((evt.key === "c" || evt.key === "C") && comments.on) setCommentMode(!commentMode);
+  if (evt.key === "/" && comments.on) { evt.preventDefault(); setChat(true); chat.box.focus(); }
   if (evt.key === "+" || evt.key === "=") map.zoomBy(1.6);
   if (evt.key === "-") map.zoomBy(1 / 1.6);
   if (evt.key === "0") map.fit();
@@ -886,21 +1196,29 @@ testsToggle.onchange = () => {
   map.fit();
 };
 
-const split = document.getElementById("split");
-split.addEventListener("pointerdown", evt => {
-  split.setPointerCapture(evt.pointerId);
-  split.classList.add("dragging");
-  const move = e => {
-    panel.style.width = Math.max(320, Math.min(window.innerWidth - 200, window.innerWidth - e.clientX)) + "px";
-  };
-  const up = () => {
-    split.classList.remove("dragging");
-    split.removeEventListener("pointermove", move);
-    split.removeEventListener("pointerup", up);
-  };
-  split.addEventListener("pointermove", move);
-  split.addEventListener("pointerup", up);
-});
+// splitter makes a bar resize the column next to it as it is dragged. width
+// turns the pointer's x into the column's width.
+function splitter(bar, col, width, key) {
+  try { const w = localStorage.getItem(key); if (w) col.style.width = w; } catch {}
+  bar.addEventListener("pointerdown", evt => {
+    bar.setPointerCapture(evt.pointerId);
+    bar.classList.add("dragging");
+    const move = e => { col.style.width = width(e.clientX) + "px"; };
+    const up = () => {
+      bar.classList.remove("dragging");
+      bar.removeEventListener("pointermove", move);
+      bar.removeEventListener("pointerup", up);
+      try { localStorage.setItem(key, col.style.width); } catch {}
+    };
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up);
+  });
+}
+splitter(document.getElementById("split"), panel,
+  x => Math.max(320, Math.min(window.innerWidth - 200, window.innerWidth - x)), "map-pr:panel-width");
+// The chat leaves the map at least 300px beside the side panel.
+splitter(document.getElementById("chat-split"), chat.el,
+  x => Math.max(240, Math.min(window.innerWidth - panel.offsetWidth - 300, x)), "map-pr:chat-width");
 
 if (!nodes.length) {
   document.getElementById("stage").insertAdjacentHTML("beforeend",

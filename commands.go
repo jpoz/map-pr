@@ -179,6 +179,8 @@ func anchorText(a comments.Anchor) string {
 		return a.Node
 	case a.Package != "":
 		return "package " + a.Package
+	case a.X == 0 && a.Y == 0:
+		return "chat"
 	default:
 		return fmt.Sprintf("map point (%.0f, %.0f)", a.X, a.Y)
 	}

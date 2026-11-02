@@ -43,6 +43,12 @@
   .legend .l-modified::before { background: var(--modified); }
   .legend .l-caller::before { background: var(--caller); }
   .legend .l-entry::before { background: var(--entry); }
+  .legend .l-call { cursor: help; }
+  .legend .l-call::before { background: var(--hl); border: 1px solid var(--line); }
+  /* A walk's call is new in the PR, or an old call into code the PR changed. */
+  .call-kind { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 8px; padding: 0 6px; vertical-align: 1px; }
+  .call-kind.new { color: var(--added); border-color: var(--added); }
   .legend .toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--ink); }
   .legend .toggle input { margin: 0; }
   main { display: flex; flex: 1; min-height: 0; }
@@ -82,8 +88,9 @@
   aside { width: min(600px, 42vw); min-width: 320px; background: var(--panel);
     overflow: auto; padding: 16px; }
   aside.wide { width: min(1100px, 70vw); }
-  #split { width: 6px; flex: none; cursor: col-resize; background: var(--line); }
-  #split:hover, #split.dragging { background: var(--muted); }
+  #split, #chat-split { width: 6px; flex: none; cursor: col-resize; background: var(--line); }
+  #split:hover, #split.dragging, #chat-split:hover, #chat-split.dragging { background: var(--muted); }
+  #chat[hidden] + #chat-split { display: none; }
   aside h2 { font-size: 15px; margin: 0 0 4px; word-break: break-word; }
   aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
     margin: 18px 0 6px; }
@@ -121,6 +128,12 @@
     background: var(--code-bg); border: 1px solid var(--line); border-bottom: 0;
     border-radius: 6px 6px 0 0; padding: 5px 10px; user-select: all; }
   .src-path + pre { border-top-left-radius: 0; border-top-right-radius: 0; }
+  /* The source header sticks to the top of the panel, and names the code. */
+  .src-path { position: sticky; top: 0; z-index: 1; user-select: text; }
+  .src-path b { color: var(--ink); font-weight: 600; }
+  pre .ln.folded { display: none; }
+  pre .ln.fold { cursor: pointer; color: var(--muted); background: var(--pkg-bg); padding: 2px 10px; font-style: italic; }
+  pre .ln.fold:hover { color: var(--caller); background: var(--caller-bg); }
   pre .ln { display: block; padding: 0 10px; white-space: pre; }
   pre .ln.chg { background: var(--added-bg); box-shadow: inset 3px 0 var(--added); }
   pre.src .ln.del { background: var(--removed-bg); box-shadow: inset 3px 0 var(--removed); }
@@ -156,13 +169,78 @@
   button.primary { background: var(--note-line); border-color: var(--note-line); color: #fff; }
   .tour-nav { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
   .tour-nav .count { color: var(--muted); font-size: 12px; margin-right: auto; }
+  /* A walk: the path so far, the calls of the current function, and its
+     source with each call numbered. */
+  ul.links li[data-walk], li.group > div[data-walk] { cursor: pointer; }
+  ul.links li[data-walk]:hover > .name, li.group > div[data-walk]:hover > .name { color: var(--caller); }
+  .walk-head { display: flex; align-items: center; gap: 8px; margin: 12px 0 8px; }
+  .walk-head .count { color: var(--muted); font-size: 12px; margin-right: auto; }
+  ol.trail { list-style: none; padding: 0; margin: 0 0 10px; font: 12px ui-monospace, Menlo, monospace; }
+  ol.trail li { cursor: pointer; padding: 2px 0; color: var(--muted); }
+  ol.trail li .arrow { color: var(--muted); }
+  ol.trail li:hover .name { color: var(--caller); }
+  ol.trail li.here { color: var(--ink); font-weight: 600; cursor: default; }
+  .walk-start { border: 1px dashed var(--line); border-radius: 6px; padding: 6px 10px; margin: 0 0 10px; }
+  .walk-start p { margin: 0 0 6px; }
+  ol.calls { list-style: none; padding: 0; margin: 0 0 6px; }
+  ol.calls li { display: flex; gap: 8px; padding: 6px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  ol.calls li .num { color: var(--entry); font-weight: 700; }
+  ol.calls li.cur { border-color: var(--entry); background: var(--code-bg); }
+  ol.calls li:hover .name { color: var(--caller); }
+  /* The call number sits in the line-number column, after the number. */
+  pre .ln[data-call] { position: relative; }
+  pre .call-n { color: var(--entry); font-weight: 700; position: absolute; left: calc(10px + 2.55em); }
+  pre .ln.on { background: var(--entry-bg); box-shadow: inset 3px 0 var(--entry); }
   .back { color: var(--muted); font-size: 12px; cursor: pointer; margin-bottom: 8px; display: inline-block; }
   .back:hover { color: var(--ink); }
   /* Comments: a thread of messages, and the box to write one. */
   .hud .group:has(> [hidden]:only-child) { display: none; }
-  #stage.commenting::after { content: "Click anywhere on the map to ask about it · Esc to cancel"; position: absolute;
+  #stage.commenting::after { content: "Click anywhere on the map to attach it to your message · Esc to cancel"; position: absolute;
     top: 12px; left: 50%; transform: translateX(-50%); background: var(--note-line); color: #fff; font-size: 12px;
     padding: 5px 12px; border-radius: 14px; box-shadow: var(--shadow); pointer-events: none; }
+  /* The chat with Claude, down the left side of the map. */
+  #chat { width: 340px; flex: none; display: flex; flex-direction: column; background: var(--panel); min-height: 0; }
+  #chat[hidden], #toast[hidden] { display: none; }
+  #chat .head { display: flex; align-items: baseline; gap: 8px; padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+  #chat .head b { font-size: 14px; }
+  #chat .head span { color: var(--muted); font-size: 11px; flex: 1; }
+  #chat .head button { border: 0; background: transparent; color: var(--muted); font-size: 16px; padding: 0 4px; cursor: pointer; }
+  #chat .head button:hover { color: var(--ink); }
+  #chat-log { flex: 1; overflow: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+  #chat-log .msg { scroll-margin: 12px; flex: none; }
+  #chat-log .msg.you { align-self: flex-end; max-width: 92%; background: var(--code-bg); }
+  #chat-log .msg.you:has(.att) { width: 92%; }
+  #chat-log .msg.fresh { box-shadow: 0 0 0 2px var(--note-line); }
+  #chat-log .msg.flash { animation: flash 1.6s ease-out; }
+  @keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px var(--entry); } 100% { box-shadow: 0 0 0 0 transparent; } }
+  #chat-log .quote { color: var(--muted); font-size: 11px; margin: 2px 0 4px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #chat-log .quote:hover { color: var(--ink); }
+  #chat-log .waiting { font-size: 11px; margin-top: 4px; }
+  #chat .compose { border-top: 1px solid var(--line); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 6px; }
+  #chat-attach { display: flex; align-items: center; gap: 4px; }
+  #chat-attach[hidden] { display: none; }
+  #chat-attach .att { flex: 1; margin: 0; }
+  #chat-attach .x { border: 0; background: transparent; color: var(--muted); font-size: 16px; cursor: pointer; padding: 0 4px; }
+  #chat-attach .x:hover { color: var(--ink); }
+  #chat-input { width: 100%; resize: none; font: inherit; font-size: 13px; }
+  #chat .compose .hint { display: flex; justify-content: space-between; }
+  #chat .error { color: var(--removed); font-size: 12px; margin: 0; }
+  #chat .error[hidden] { display: none; }
+  .att { display: flex; flex-direction: column; gap: 1px; margin: 4px 0; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+    background: var(--note-bg); border-left: 3px solid var(--note-line); font-size: 11px; min-width: 0; }
+  .att:hover { filter: brightness(1.08); }
+  .att .where { font-weight: 600; color: var(--note-line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .att code { font: 11px ui-monospace, Menlo, monospace; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #chat-btn .badge { background: var(--note-line); color: #fff; border-radius: 9px; font-size: 10px; font-weight: 700;
+    padding: 1px 6px; margin-left: 6px; }
+  #chat-btn .badge[hidden] { display: none; }
+  #toast { position: absolute; top: 48px; left: 50%; transform: translateX(-50%); max-width: min(520px, calc(100% - 32px));
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--note-line); border-radius: 8px;
+    box-shadow: var(--shadow); padding: 8px 12px; font-size: 13px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+  #toast b { white-space: nowrap; }
+  #toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  #toast:hover { border-color: var(--note-line); }
   .anchor { margin: 4px 0 8px; }
   .anchor [data-goto] { cursor: pointer; font-weight: 600; }
   .anchor [data-goto]:hover { color: var(--caller); }
@@ -203,11 +281,22 @@
   <h1 id="title">PR Map</h1>
   <div class="meta" id="meta"></div>
   <div class="legend">
-    <span class="l-added">added</span><span class="l-modified">modified</span><span class="l-caller">uses a change</span><span class="l-entry">entry point</span><span class="l-top" title="A changed function that no other changed function calls, directly or through other code. Start reviewing here. A package shows how many it holds.">start here</span>
+    <span class="l-added">added</span><span class="l-modified">modified</span><span class="l-caller">uses a change</span><span class="l-entry">entry point</span><span class="l-call" title="A line, not changed itself, that calls code this PR changes.">calls a change</span><span class="l-top" title="A changed function that no other changed function calls, directly or through other code. Start reviewing here. A package shows how many it holds.">start here</span>
     <label class="toggle"><input type="checkbox" id="show-tests"> show tests</label>
   </div>
 </header>
 <main>
+  <section id="chat" hidden>
+    <div class="head"><b>Claude</b><span>answers from the session that serves this map</span><button id="chat-close" title="Hide the chat">×</button></div>
+    <div id="chat-log"></div>
+    <div class="compose">
+      <div id="chat-attach" hidden></div>
+      <textarea id="chat-input" rows="3" placeholder="Ask about this PR. Click a line number to attach it."></textarea>
+      <div class="hint"><span>Enter to send · Shift+Enter for a new line</span><span>/ to focus</span></div>
+      <p class="error" hidden></p>
+    </div>
+  </section>
+  <div id="chat-split" title="Drag to resize"></div>
   <div id="stage">
     <canvas id="map"></canvas>
     <div class="hud">
@@ -218,10 +307,11 @@
         <button data-zoom="out" title="Zoom out (−)">−</button><button data-zoom="fit" title="Fit (0)">Fit</button><button data-zoom="in" title="Zoom in (+)">+</button>
       </div>
       <div class="group">
-        <button id="comment-btn" title="Drop a question on the map (C)" hidden>Comment</button>
+        <button id="chat-btn" title="Chat with Claude (/)" hidden>Chat<span class="badge" hidden></span></button><button id="comment-btn" title="Attach any place on the map to a chat message (C)" hidden>Point</button>
       </div>
     </div>
     <div id="tip" hidden></div>
+    <div id="toast" hidden></div>
     <div id="ports" hidden></div>
   </div>
   <div id="split" title="Drag to resize"></div>
