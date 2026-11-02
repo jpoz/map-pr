@@ -81,6 +81,20 @@ A repository with both languages gets one map. If the PR changes a JavaScript
 file in a Go repository and the `typescript` package is missing, map-pr says so
 and maps the Go code.
 
+## SQL migrations
+
+A changed `.sql` file in a folder whose name starts with `migrat` (such as
+`migrations/` or `db/migrate/`) is on the map too: each statement is a card,
+in a package named after the folder. A `CREATE`, `ALTER` or `DROP TABLE` is a
+`table`; an index, function, type or change to rows is `sql`. A goose
+`-- +goose Down` section and golang-migrate `.down.sql` files are left out,
+as they only undo the migration.
+
+Code that names a table in SQL (after `FROM`, `INTO`, `UPDATE`, `JOIN` or
+`TABLE`) uses that table, so a new table links to the queries that read and
+write it, such as the constants sqlc generates. An `ALTER TABLE` that adds
+columns links to code that names the table and one of those columns.
+
 ## Zooming
 
 The map is one space you zoom through, with three levels of detail:
@@ -119,9 +133,30 @@ top-level code of a TypeScript module, or code with no callers outside tests (us
 up from each declaration on the map to the nearest entry points, through up to
 8 calls that are not on the map. It keeps the fewest entry points that reach
 every change, and adds those to the map with a dashed edge; the panel shows the
-calls in between. The overview lists them as "Entry points · start here", most
-changes first, and puts routes that reach the same changes in one row. Each
+calls in between. The overview lists them under "Walk the code", most changes
+first, and puts routes that reach the same changes in one row. Each
 declaration lists the entry points it is reached from.
+
+## Walking the code
+
+A walk follows one path of calls, the way a debugger steps into calls. Pick an
+entry point under "Walk the code", or press "Walk the path to here" on any
+function to start at the nearest entry point that reaches it. The panel shows
+the current function, the path so far, and the calls it makes into code on the
+map, numbered in source order; the same numbers mark the call lines in its
+source. ↑ and ↓ choose a call, → or Enter steps into it, ← steps out, and a
+click on a call in the code steps into it. Each step is in the URL
+(`#walk=key > key`), so the browser's back button steps out too.
+
+## Long functions
+
+In a declaration of more than 40 lines, a run of 8 or more lines that the
+change does not touch folds into one "⋯ N unchanged lines" row, on the map and
+in the panel, as a PR view folds code. Changed lines, the lines next to
+deleted ones, calls into code on the map, the first and last line, and 3 lines
+around each of them stay. Click a fold to open it. While a long card's header
+is above the top of the screen, its name stays in a bar at the top, and the
+panel keeps the name in the header of the source.
 
 Calls through an interface do not link, so a chain can end at a "no callers"
 entry point that a real request reaches.
@@ -142,14 +177,22 @@ Try it: `scripts/demo.sh` makes a repo that changes `authGoogle` and maps it.
 map-pr serve -dir path/to/map-dir -open   # serves pr-map.html on 127.0.0.1:8770
 ```
 
-Served this way, the page has a **Comment** button (or press `C`): click
-anywhere on the map to ask about that place. A click on a card's code asks
-about that line; a click on a package or empty space asks about it. In the side
-panel, "Ask about this" and the line numbers of the source do the same. Each
-question shows as a pin on the map and as a thread in the panel, where answers
-appear without a reload.
+Served this way, the page has a **chat with Claude** down its left side (the
+Chat button, or `/` to type in it). A message can carry a place on the map:
+click a line number in a card's code or in the side panel, or "Ask about this"
+on a declaration, and that line or declaration goes on the message you are
+writing. **Point** (or `C`) attaches any place: a line, a card, a package, or a
+point on the map. Enter sends, Shift+Enter starts a new line. Drag the edge of
+the chat, or of the side panel, to resize it; the page keeps the width.
 
-The threads are in `comments.json` next to the page. Nothing leaves the
+A message with a place shows as a pin on the map. Click the place on a message
+to go back to it on the map; click a pin to find its message in the chat. An
+answer to an earlier question quotes it. While the chat is hidden, the Chat
+button and the tab title count the answers you have not read, and a new answer
+shows a short notice at the top of the map. Which answers you have read is kept
+in the browser.
+
+Each message you send is a thread in `comments.json` next to the page. Nothing leaves the
 machine: the server listens on loopback only, refuses other hosts, and accepts
 only JSON posts. Answer from the terminal:
 
@@ -163,7 +206,8 @@ Opened as a file, the page has no comments.
 
 ## Limits (for now)
 
-- Go, TypeScript and JavaScript only.
+- Go, TypeScript and JavaScript, and the statements of SQL migrations. Other
+  files show as diffs in the panel.
 - Calls through an interface do not link to the concrete method. In
   TypeScript, a call through an interface or a function value does not link either.
 - Deleted declarations are not on the map; their files show as diffs in the panel.

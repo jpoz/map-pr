@@ -249,6 +249,7 @@ func Build(d *gitdiff.Diff, opts Options) (*Map, error) {
 			joinPackages(s)
 		}
 	}
+	scanMigrations(s, d)
 	return build(d, s, opts), nil
 }
 
@@ -1054,14 +1055,16 @@ func usersOf(n *Node, rs map[ref]bool, decls map[string]*declInfo, onMap map[str
 			list = append(list, r)
 		}
 	}
+	// Code before tests, which start hidden; then users already on the map.
 	rank := func(r ref) int {
-		switch {
-		case onMap[r.from]:
-			return 0
-		case !decls[r.from].node.IsTest:
-			return 1
+		rank := 0
+		if decls[r.from].node.IsTest {
+			rank += 2
 		}
-		return 2
+		if !onMap[r.from] {
+			rank++
+		}
+		return rank
 	}
 	sort.Slice(list, func(i, j int) bool {
 		a, b := list[i], list[j]
