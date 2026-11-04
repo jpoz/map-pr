@@ -1852,7 +1852,8 @@ function ZoomMap(canvas, opts) {
     if (lineNo) {
       if (hoverRef || hoverLocal) { hoverRef = null; hoverLocal = null; request(); }
       canvas.style.cursor = "pointer";
-      opts.onTip?.({ title: `Ask about line ${lineNo.line}`, sub: lineNo.card.node.name, x: e.offsetX, y: e.offsetY });
+      const calls = lineNo.card.callTo && lineNo.card.callTo.get(lineNo.line);
+      opts.onTip?.({ title: `Ask about line ${lineNo.line}`, sub: calls && calls.length ? callText(calls) : lineNo.card.node.name, x: e.offsetX, y: e.offsetY });
       return;
     }
     const ref = found.card && !commentMode ? refAt(found.card, e.offsetX, e.offsetY) : null;
@@ -1866,6 +1867,11 @@ function ZoomMap(canvas, opts) {
     let tip = null;
     if (found.card && S.nameFont * cam.z < NAME_PX[1]) tip = { title: found.card.node.name, sub: `${found.card.node.kind} · ${found.card.node.file}:${found.card.node.line}` };
     else if (found.pkg && found.pkg.t < 0.5 && found.pkg.labelHidden) tip = { title: found.pkg.path, sub: statsText(found.pkg) };
+    else if (found.card && !commentMode) {
+      // A line that calls a change says what it calls: the line itself did not change.
+      const calls = callTipAt(found.card, e.offsetX, e.offsetY);
+      if (calls) tip = { title: calls, sub: "This line is not changed." };
+    }
     opts.onTip?.(tip && { ...tip, x: e.offsetX, y: e.offsetY });
   });
 
@@ -1994,14 +2000,35 @@ function ZoomMap(canvas, opts) {
   readColors();
   resize();
 
-  // setCallLines marks, in each card, the lines that use something on the map.
+  // markCallLines marks, in each card, the lines that use something on the
+  // map. callTo maps each such line to the declarations it calls, for the
+  // tooltip.
   function markCallLines() {
-    for (const c of cards.values()) c.callLines = null;
+    for (const c of cards.values()) { c.callLines = null; c.callTo = null; }
     for (const e of edges) {
       const lines = (e.lines || []).filter(l => l >= e.a.node.line && l <= e.a.node.endLine);
       if (!lines.length) continue;
       e.a.callLines = [...new Set([...(e.a.callLines || []), ...lines])];
+      e.a.callTo ||= new Map();
+      for (const l of lines) {
+        const to = e.a.callTo.get(l) || [];
+        if (e.b && !to.includes(e.b.node)) to.push(e.b.node);
+        e.a.callTo.set(l, to);
+      }
     }
+  }
+  // callTipAt is the tooltip text for a line that calls a change: what it
+  // calls and how each one changed.
+  function callTipAt(c, sx0, sy0) {
+    if (!c.callTo || codeAlpha(c) < 0.5) return null;
+    const [, y] = toWorld(sx0, sy0);
+    const line = c.rowNo[Math.floor((y - (c.y + c.hd + S.bodyPad)) / c.lh)];
+    const to = line > 0 && c.callTo.get(line);
+    return to && to.length ? callText(to) : null;
+  }
+  function callText(to) {
+    const label = n => ({ caller: "uses a change", entry: "entry point" })[n.status] || n.status;
+    return "Calls " + to.map(n => `${n.name} (${label(n)})`).join(", ");
   }
 
   return {

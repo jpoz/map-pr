@@ -44,6 +44,19 @@ const tests = nodes.filter(n => n.isTest);
 const noteOf = n => NOTES.nodes[n.key];
 const statusLabel = n => ({ caller: "uses a change", entry: "entry point" })[n.status] || n.status;
 
+// callTips gives each line that calls a change a hover text that names what
+// it calls, so a call line does not read as a changed line.
+function callTips(uses) {
+  const to = new Map();
+  for (const e of uses) for (const l of e.lines || []) {
+    const names = to.get(l) || [];
+    const d = byId[e.to];
+    if (d && !names.includes(d)) names.push(d);
+    to.set(l, names);
+  }
+  return new Map([...to].map(([l, ds]) => [l, "Calls " + ds.map(d => `${d.name} (${statusLabel(d)})`).join(", ") + ". This line is not changed."]));
+}
+
 // ---------- entry points ----------
 
 // Entry points are where execution starts: HTTP handlers, main, functions
@@ -217,7 +230,7 @@ function mapData() {
 // walk's calls: line to call index. With fold, long runs of unchanged lines
 // hide behind a row that shows them on a click, as a PR view does; the
 // hidden rows stay in the block, so the cells still match source lines.
-function codeBlock(n, highlight = [], marks = new Map(), fold = true) {
+function codeBlock(n, highlight = [], marks = new Map(), fold = true, tips = new Map()) {
   const changed = new Set(n.changed || []);
   const hl = new Set(highlight);
   const removed = n.removed || {};
@@ -233,7 +246,8 @@ function codeBlock(n, highlight = [], marks = new Map(), fold = true) {
     const num = marks.has(no) ? `<span class="call-n">${circled(marks.get(no))}</span>` : "";
     const head = r >= 0 && runs[r][0] === no
       ? `<span class="ln fold" data-fold="${r}">⋯ ${runs[r][1] - no + 1} unchanged lines (${no}–${runs[r][1]}) · click to show</span>` : "";
-    return head + del(no) + `<span class="ln ${cls}"${mark}${r >= 0 ? ` data-in="${r}"` : ""}><span class="no">${no}</span>${num}<span class="code">${esc(text)}</span></span>`;
+    const tip = tips.has(no) ? ` title="${esc(tips.get(no))}"` : "";
+    return head + del(no) + `<span class="ln ${cls}"${mark}${tip}${r >= 0 ? ` data-in="${r}"` : ""}><span class="no">${no}</span>${num}<span class="code">${esc(text)}</span></span>`;
   }).join("") + del(n.line + lines.length) + "</pre>";
 }
 
@@ -515,7 +529,7 @@ function showNode(id) {
     <div class="questions" data-for="${esc(n.key)}">${threadList(threadsAt(n.key))}</div>` : ""}
     <h3>Source <button class="mini" data-code="${esc(id)}">Zoom to code</button></h3>
     ${srcHead(n, comments.on ? ` <span class="hint">· click a line number to ask Claude about it</span>` : "")}
-    ${codeBlock(n, uses.flatMap(e => e.lines || []))}`);
+    ${codeBlock(n, uses.flatMap(e => e.lines || []), new Map(), true, callTips(uses))}`);
 }
 
 // selectNode shows a declaration. From the panel or a link the map flies to
