@@ -296,6 +296,14 @@ func scanGo(s *scan, root string, opts Options) error {
 
 	funcs := s.decls
 	seenFiles := map[string]bool{}
+	// A call through an interface method is resolved after the scan, when
+	// every type that could implement the interface is known.
+	type ifaceCall struct {
+		method *types.Func
+		from   string
+		line   int
+	}
+	var ifaceCalls []ifaceCall
 
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
@@ -355,6 +363,9 @@ func scanGo(s *scan, root string, opts Options) error {
 					used := symbol(pkg.TypesInfo.Uses[ident])
 					if used == nil {
 						return true
+					}
+					if fn, ok := used.(*types.Func); ok && isInterfaceMethod(fn) {
+						ifaceCalls = append(ifaceCalls, ifaceCall{fn, from, pkg.Fset.Position(ident.Pos()).Line})
 					}
 					to := objID(pkg.Fset, used)
 					if to == from {
@@ -421,7 +432,89 @@ func scanGo(s *scan, root string, opts Options) error {
 			}
 		}
 	}
+	impls := implementations(pkgs, root)
+	for _, c := range ifaceCalls {
+		for _, m := range impls(c.method) {
+			if to := objID(pkgs[0].Fset, m); to != c.from {
+				s.addRef(to, ref{from: c.from, line: c.line})
+			}
+		}
+	}
 	return nil
+}
+
+// maxImplementations is the most implementations an interface method may
+// have for its calls to link to them. An interface with more is too general
+// for a call through it to say which code runs.
+const maxImplementations = 4
+
+// isInterfaceMethod reports whether fn is a method of an interface type.
+func isInterfaceMethod(fn *types.Func) bool {
+	recv := fn.Signature().Recv()
+	return recv != nil && types.IsInterface(recv.Type())
+}
+
+// implementations returns a function that lists the methods that implement
+// an interface method: the methods of the same name on the named types of
+// this repository, outside test files, whose value or pointer implements
+// the interface. It lists none for an interface declared outside the
+// repository (io.Writer and the like), or with more than
+// maxImplementations implementations.
+func implementations(pkgs []*packages.Package, root string) func(*types.Func) []*types.Func {
+	inRepo := func(fset *token.FileSet, obj types.Object) bool {
+		rel := relPath(root, fset.Position(obj.Pos()).Filename)
+		return rel != ".." && !strings.HasPrefix(rel, "../") && !filepath.IsAbs(rel) && !strings.HasSuffix(rel, "_test.go")
+	}
+	var fset *token.FileSet
+	var named []*types.TypeName
+	seen := map[string]bool{}
+	for _, pkg := range pkgs {
+		// A test variant type-checks its package again, with its own
+		// types; the plain package holds the types other packages use.
+		if pkg.Types == nil || strings.Contains(pkg.ID, " [") || strings.HasSuffix(pkg.ID, ".test") {
+			continue
+		}
+		fset = pkg.Fset
+		scope := pkg.Types.Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || tn.IsAlias() || types.IsInterface(tn.Type()) || seen[objID(pkg.Fset, tn)] || !inRepo(pkg.Fset, tn) {
+				continue
+			}
+			seen[objID(pkg.Fset, tn)] = true
+			named = append(named, tn)
+		}
+	}
+	cache := map[*types.Func][]*types.Func{}
+	return func(m *types.Func) []*types.Func {
+		if out, ok := cache[m]; ok {
+			return out
+		}
+		var out []*types.Func
+		iface, _ := m.Signature().Recv().Type().Underlying().(*types.Interface)
+		if iface != nil && fset != nil && inRepo(fset, m) {
+			for _, tn := range named {
+				t := tn.Type()
+				if !types.Implements(t, iface) {
+					if t = types.NewPointer(t); !types.Implements(t, iface) {
+						continue
+					}
+				}
+				sel := types.NewMethodSet(t).Lookup(m.Pkg(), m.Name())
+				if sel == nil {
+					continue
+				}
+				if fn, ok := sel.Obj().(*types.Func); ok && inRepo(fset, fn) {
+					out = append(out, fn.Origin())
+				}
+			}
+			if len(out) > maxImplementations {
+				out = nil
+			}
+		}
+		cache[m] = out
+		return out
+	}
 }
 
 // build makes the map from what a scan found.

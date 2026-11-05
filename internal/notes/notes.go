@@ -17,7 +17,6 @@ type Notes struct {
 	URL     string            `json:"url,omitempty"`
 	Summary string            `json:"summary"`
 	Themes  []Theme           `json:"themes"`
-	Tour    []Step            `json:"tour"`
 	Nodes   map[string]string `json:"nodes"`
 }
 
@@ -28,15 +27,6 @@ type Theme struct {
 	Summary string   `json:"summary"`
 	Nodes   []string `json:"nodes"`
 	Files   []string `json:"files,omitempty"`
-}
-
-// Step is one stop on the guided tour.
-type Step struct {
-	Title string   `json:"title"`
-	Body  string   `json:"body"`
-	Theme string   `json:"theme,omitempty"`
-	Nodes []string `json:"nodes"`
-	Files []string `json:"files,omitempty"`
 }
 
 // Load reads notes from a JSON file.
@@ -58,11 +48,6 @@ func (n *Notes) Check(m *callgraph.Map) []string {
 	for _, node := range m.Nodes {
 		keys[node.Key] = true
 	}
-	themes := map[string]bool{}
-	for _, t := range n.Themes {
-		themes[t.ID] = true
-	}
-
 	var problems []string
 	if n.URL != "" {
 		if u, err := url.Parse(n.URL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
@@ -86,18 +71,6 @@ func (n *Notes) Check(m *callgraph.Map) []string {
 		}
 		for _, f := range t.Files {
 			unknownFile("theme "+t.ID, f)
-		}
-	}
-	for i, s := range n.Tour {
-		where := fmt.Sprintf("tour step %d", i+1)
-		for _, k := range s.Nodes {
-			unknown(where, k)
-		}
-		for _, f := range s.Files {
-			unknownFile(where, f)
-		}
-		if s.Theme != "" && !themes[s.Theme] {
-			problems = append(problems, fmt.Sprintf("%s: theme %q does not exist", where, s.Theme))
 		}
 	}
 	for k := range n.Nodes {

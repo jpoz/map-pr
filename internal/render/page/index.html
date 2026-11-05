@@ -45,10 +45,6 @@
   .legend .l-entry::before { background: var(--entry); }
   .legend .l-call { cursor: help; }
   .legend .l-call::before { background: var(--hl); border: 1px solid var(--line); }
-  /* A walk's call is new in the PR, or an old call into code the PR changed. */
-  .call-kind { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted);
-    border: 1px solid var(--line); border-radius: 8px; padding: 0 6px; vertical-align: 1px; }
-  .call-kind.new { color: var(--added); border-color: var(--added); }
   .legend .toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--ink); }
   .legend .toggle input { margin: 0; }
   main { display: flex; flex: 1; min-height: 0; }
@@ -87,7 +83,6 @@
   button.mini { font-size: 11px; padding: 1px 8px; margin-left: 8px; text-transform: none; letter-spacing: 0; vertical-align: 1px; }
   aside { width: min(600px, 42vw); min-width: 320px; background: var(--panel);
     overflow: auto; padding: 16px; }
-  aside.wide { width: min(1100px, 70vw); }
   #split, #chat-split { width: 6px; flex: none; cursor: col-resize; background: var(--line); }
   #split:hover, #split.dragging, #chat-split:hover, #chat-split.dragging { background: var(--muted); }
   #chat[hidden] + #chat-split { display: none; }
@@ -167,30 +162,26 @@
   button:hover:not(:disabled) { border-color: var(--muted); }
   button:disabled { opacity: .4; cursor: default; }
   button.primary { background: var(--note-line); border-color: var(--note-line); color: #fff; }
-  .tour-nav { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
-  .tour-nav .count { color: var(--muted); font-size: 12px; margin-right: auto; }
-  /* A walk: the path so far, the calls of the current function, and its
-     source with each call numbered. */
-  ul.links li[data-walk], li.group > div[data-walk] { cursor: pointer; }
-  ul.links li[data-walk]:hover > .name, li.group > div[data-walk]:hover > .name { color: var(--caller); }
-  .walk-head { display: flex; align-items: center; gap: 8px; margin: 12px 0 8px; }
-  .walk-head .count { color: var(--muted); font-size: 12px; margin-right: auto; }
-  ol.trail { list-style: none; padding: 0; margin: 0 0 10px; font: 12px ui-monospace, Menlo, monospace; }
-  ol.trail li { cursor: pointer; padding: 2px 0; color: var(--muted); }
-  ol.trail li .arrow { color: var(--muted); }
-  ol.trail li:hover .name { color: var(--caller); }
-  ol.trail li.here { color: var(--ink); font-weight: 600; cursor: default; }
-  .walk-start { border: 1px dashed var(--line); border-radius: 6px; padding: 6px 10px; margin: 0 0 10px; }
-  .walk-start p { margin: 0 0 6px; }
-  ol.calls { list-style: none; padding: 0; margin: 0 0 6px; }
-  ol.calls li { display: flex; gap: 8px; padding: 6px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
-  ol.calls li .num { color: var(--entry); font-weight: 700; }
-  ol.calls li.cur { border-color: var(--entry); background: var(--code-bg); }
-  ol.calls li:hover .name { color: var(--caller); }
-  /* The call number sits in the line-number column, after the number. */
-  pre .ln[data-call] { position: relative; }
-  pre .call-n { color: var(--entry); font-weight: 700; position: absolute; left: calc(10px + 2.55em); }
-  pre .ln.on { background: var(--entry-bg); box-shadow: inset 3px 0 var(--entry); }
+  .path-nav { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+  .path-nav .count { color: var(--muted); font-size: 12px; margin-right: auto; }
+  /* A code path: its stations in call order on a vertical line in the path's color. */
+  .path-chip { display: inline-block; min-width: 18px; height: 18px; border-radius: 9px; color: #fff; font-size: 11px; font-weight: 700;
+    text-align: center; line-height: 18px; padding: 0 4px; vertical-align: 1px; }
+  ul.links li[data-path] { cursor: pointer; }
+  ul.links li[data-path]:hover .name { color: var(--caller); }
+  ol.stations { list-style: none; padding: 0; margin: 0 0 6px; position: relative; }
+  ol.stations::before { content: ""; position: absolute; left: 9px; top: 14px; bottom: 14px; width: 4px; border-radius: 2px; background: var(--path); }
+  ol.stations li { position: relative; padding: 6px 6px 6px 30px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  ol.stations li::before { content: ""; position: absolute; left: 5px; top: 10px; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--panel); border: 2px solid var(--path); }
+  ol.stations li.interchange::before { left: 3px; top: 8px; width: 12px; height: 12px; border: 2.5px solid var(--ink); }
+  ol.stations li.cur { border-color: var(--path); background: var(--code-bg); }
+  ol.stations li:hover .name { color: var(--caller); }
+  ol.stations .call { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  ol.stations .also { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  ol.stations .also [data-path] { cursor: pointer; }
+  a.file-link { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+  a.file-link:hover { color: var(--caller); text-decoration-color: currentColor; }
   .back { color: var(--muted); font-size: 12px; cursor: pointer; margin-bottom: 8px; display: inline-block; }
   .back:hover { color: var(--ink); }
   /* Comments: a thread of messages, and the box to write one. */
@@ -321,6 +312,7 @@
 <script>
 window.MAPR_DATA = {{.Data}};
 window.MAPR_NOTES = {{.Notes}};
+window.MAPR_LINKS = {{.Links}};
 </script>
 <script>{{.Engine}}</script>
 <script>{{.App}}</script>

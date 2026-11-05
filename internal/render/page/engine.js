@@ -73,11 +73,14 @@ function ZoomMap(canvas, opts) {
   let cards = new Map(), pkgs = new Map(), edges = [], pkgEdges = [], bounds = { x: 0, y: 0, w: 1, h: 1 };
   let leaving = []; // cards that fade out after a layout change
   let hover = null, selected = null, focus = null;
+  // Code paths: {id, color, label, ids, cards}, drawn as colored lines.
+  // activeFlow is the path that is open; hoverFlow the one under the pointer.
+  let flows = [], activeFlow = null, hoverFlow = null;
   // Comment pins: {id, node, line, pkg, x, y, state, count}. In comment mode
   // a click drops a new comment where it lands.
   let notePins = [], activePin = null, commentMode = false;
   let fly = null, wheel = null, inertia = null, tween = null;
-  let dirty = true, frame = 0, lastLevel = "", drawMs = 0;
+  let dirty = true, frame = 0, lastLevel = "", drawMs = 0, lastOpen = 0;
   const tokens = new Map();
   const tokenQueue = [];
   let tokenBusy = false;
@@ -475,6 +478,7 @@ function ZoomMap(canvas, opts) {
       tween = null;
     }
     ({ cards, pkgs, edges, pkgEdges } = next);
+    setFlows(data.flows || []);
     if (tween) {
       // Bounds use the end positions, so a fit during the tween is right.
       const now = new Map([...tween.to].map(([k, t]) => [k, { x: k.x, y: k.y, w: k.w, h: k.h }]));
@@ -605,7 +609,7 @@ function ZoomMap(canvas, opts) {
 
   // updateEmphasis sets how strongly each card and package is drawn: a
   // selection or a focus dims everything else. A selection inside a focus,
-  // as in a walk, keeps both lit.
+  // as on a code path, keeps both lit.
   function updateEmphasis() {
     let keep = null, keepPkg = null;
     if (selected) {
@@ -753,17 +757,21 @@ function ZoomMap(canvas, opts) {
     if (open > 0.01) {
       drawPackageEdges((A, B) => 0.3 * Math.max(A.t, B.t));
       drawEdges(view);
+      drawFlows(open, true);
       for (const c of leaving) if (overlaps(c, view)) drawCard(c, openOf(c), 1 - (c.fadeOut = Math.max(0, (c.fadeOut ?? 1) - 0.08)));
       for (const c of cards.values()) if (overlaps(c, view)) drawCard(c, openOf(c), c.fade);
       drawArrows();
     }
     for (const p of pkgs.values()) if (overlaps(p, view)) drawSummary(p, p.t);
     drawPackageEdges((A, B) => 1 - Math.max(A.t, B.t));
+    drawFlows(open, false);
     drawLabels(view);
+    drawFlowBadges();
     drawMarks(view);
     setScreen();
     drawPins();
 
+    lastOpen = open;
     const level = open < 0.5 ? "packages" : cam.z * S.codeFont >= (CODE_PX[0] + CODE_PX[1]) / 2 ? "code" : "decls";
     if (level !== lastLevel) { lastLevel = level; opts.onLevel?.(level); }
   }
@@ -907,11 +915,11 @@ function ZoomMap(canvas, opts) {
     const z = cam.z;
     const placed = [];
     const list = [...pkgs.values()].filter(p => overlaps(p, view) && p.t < 0.99).sort((x, y) => y.w * y.h - x.w * x.h);
+    for (const p of pkgs.values()) { p.labelHidden = true; p.plate = null; }
     if (!list.length) return;
     setScreen();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    for (const p of pkgs.values()) p.labelHidden = true;
     for (const p of list) {
       const w = p.w * z, h = p.h * z;
       const cx = sx(p.x + p.w / 2), cy = sy(p.y + p.h / 2);
@@ -926,10 +934,13 @@ function ZoomMap(canvas, opts) {
       }
       if (!pick) continue;
       p.labelHidden = false;
+      p.plate = pick.box;
       placed.push(pick.box);
       const tone = toneOf(p);
       ctx.globalAlpha = (1 - p.t) * p.fade * lerp(0.35, 1, p.dim);
-      if (!pick.inside) {
+      // With code paths on the map, each label is a station's name plate
+      // over the lines that meet there.
+      if (!pick.inside || flows.length) {
         ctx.fillStyle = C.panel;
         roundRect(pick.box.x, pick.box.y, pick.box.w, pick.box.h, 8);
         ctx.fill();
@@ -961,7 +972,8 @@ function ZoomMap(canvas, opts) {
       const [p0, p3] = by <= ay ? [[ax, ay], [bx, by]] : sideAnchors(A, B);
       const dim = Math.min(A.dim, B.dim);
       const width = (1.5 + Math.min(4.5, Math.log2(e.count) * 1.2)) / z;
-      ctx.globalAlpha = a * lerp(0.15, 0.85, dim) * Math.min(A.fade, B.fade);
+      // Code paths carry the eye; the package edges stay behind them.
+      ctx.globalAlpha = a * lerp(0.15, 0.85, dim) * Math.min(A.fade, B.fade) * (flows.length ? 0.4 : 1);
       ctx.strokeStyle = C.muted;
       ctx.fillStyle = C.muted;
       ctx.lineWidth = width;
@@ -1021,6 +1033,284 @@ function ZoomMap(canvas, opts) {
     ctx.lineTo(to[0] - size * Math.cos(ang + 0.42), to[1] - size * Math.sin(ang + 0.42));
     ctx.closePath();
     ctx.fill();
+  }
+
+  // ---------- code paths ----------
+
+  // Code paths are drawn the way a subway map draws its lines: each runs
+  // only straight or at 45°, bends on a rounded corner, and has a thin casing
+  // in the background color, so a crossing reads as one line passing over
+  // another. Lines between the same two stations run side by side in one
+  // bundle. Zoomed out, a closed package is one station where its lines meet,
+  // under its name plate; as the package opens, the station splits into the
+  // declarations inside.
+  function setFlows(list) {
+    flows = list.map(f => ({ ...f, cards: f.ids.map(id => cards.get(id)).filter(Boolean) })).filter(f => f.cards.length > 1);
+  }
+
+  // stationOf is where a path stops at card c, in screen pixels: the card's
+  // center, moving to the center of its package as the package closes. key
+  // names the station, so stops in one closed package merge. The open path
+  // keeps every stop (whole), so a path inside one package still shows.
+  function stationOf(c, whole) {
+    const p = whole ? null : pkgs.get(c.node.package);
+    const t = p ? smooth(0.3, 0.7, p.t ?? 1) : 1;
+    const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+    const x = p ? lerp(p.x + p.w / 2, cx, t) : cx, y = p ? lerp(p.y + p.h / 2, cy, t) : cy;
+    return { key: p && t < 0.5 ? "pkg:" + p.id : c.id, hub: !!p && t < 0.5, card: c, x: sx(x), y: sy(y) };
+  }
+
+  // route joins two stations with straight and 45° runs: straight, diagonal,
+  // straight, with the straight part split between both ends.
+  function route(a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y, ax = Math.abs(dx), ay = Math.abs(dy);
+    const d = Math.min(ax, ay), run = (Math.max(ax, ay) - d) / 2;
+    if (d < 1 || run < 1) return [[a.x, a.y], [b.x, b.y]];
+    const p1 = ax > ay ? [a.x + Math.sign(dx) * run, a.y] : [a.x, a.y + Math.sign(dy) * run];
+    const p2 = [p1[0] + Math.sign(dx) * d, p1[1] + Math.sign(dy) * d];
+    return [[a.x, a.y], p1, p2, [b.x, b.y]];
+  }
+
+  // offsetLine moves a polyline o pixels to its left, with mitered corners,
+  // so the lines of a bundle stay parallel through each bend.
+  function offsetLine(pts, o) {
+    if (!o) return pts;
+    const n = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const dx = pts[i + 1][0] - pts[i][0], dy = pts[i + 1][1] - pts[i][1], l = Math.hypot(dx, dy) || 1;
+      n.push([-dy / l, dx / l]);
+    }
+    return pts.map((p, i) => {
+      const a = n[Math.max(0, i - 1)], b = n[Math.min(n.length - 1, i)];
+      let mx = a[0] + b[0], my = a[1] + b[1];
+      const ml = Math.hypot(mx, my);
+      if (ml < 1e-6) { mx = b[0]; my = b[1]; } else { mx /= ml; my /= ml; }
+      const k = o / Math.max(0.5, mx * b[0] + my * b[1]);
+      return [p[0] + mx * k, p[1] + my * k];
+    });
+  }
+
+  // flowLines lays out every path for this frame, in screen pixels: its
+  // polyline, its stations, and the alpha and width to draw it. open is how
+  // far the packages in view are open; the lines are wider when open, as
+  // they run behind the cards.
+  function flowLines(open) {
+    const px = lerp(4.5, 6, open), casing = 1.5, gap = px + casing;
+    const runs = flows.map(f => {
+      const st = [];
+      for (const c of f.cards) {
+        const s = stationOf(c, f.id === activeFlow);
+        if (!st.length || st[st.length - 1].key !== s.key) st.push(s);
+      }
+      return st;
+    });
+    // A bundle is the paths between two stations, in path order.
+    const bundles = new Map();
+    const bundleKey = (a, b) => a.key < b.key ? a.key + "\n" + b.key : b.key + "\n" + a.key;
+    runs.forEach((st, i) => {
+      for (let j = 1; j < st.length; j++) {
+        const k = bundleKey(st[j - 1], st[j]);
+        if (!bundles.has(k)) bundles.set(k, []);
+        if (!bundles.get(k).includes(i)) bundles.get(k).push(i);
+      }
+    });
+    const out = [];
+    flows.forEach((f, i) => {
+      const on = f.id === activeFlow, hot = f.id === hoverFlow;
+      const lit = activeFlow === null ? !selected || f.ids.includes(selected) : on;
+      let a = on || lit ? 1 : 0.15;
+      // A theme's focus dims the paths; a package's does not.
+      if (focus && focus.ids && !on && activeFlow === null) a *= 0.3;
+      if (hot) a = Math.max(a, 0.95);
+      const st = runs[i];
+      if (a < 0.02 || st.length < 2) return;
+      const pts = [];
+      for (let j = 1; j < st.length; j++) {
+        const A = st[j - 1], B = st[j], list = bundles.get(bundleKey(A, B));
+        const slot = (list.indexOf(i) - (list.length - 1) / 2) * gap;
+        // The route and its side come from the stations' sorted order, so a
+        // bundle is the same whichever way each of its paths runs.
+        const fwd = A.key < B.key;
+        const seg = offsetLine(fwd ? route(A, B) : route(B, A), slot);
+        pts.push(...(fwd ? seg : seg.reverse()));
+        if (j === 1) A.at = pts[0];
+        B.at = pts[pts.length - 1];
+      }
+      out.push({ f, a, w: px + (on || hot ? 1.5 : 0), casing, pts, st, gap, bundles: bundles });
+    });
+    // The open path and the hovered one draw last, on top.
+    return out.sort((x, y) => (x.f.id === activeFlow || x.f.id === hoverFlow) - (y.f.id === activeFlow || y.f.id === hoverFlow));
+  }
+
+  const dist = (p, q) => Math.hypot(q[0] - p[0], q[1] - p[1]);
+  // strokeRounded strokes a polyline with each corner rounded.
+  function strokeRounded(pts, r) {
+    const q = [pts[0]];
+    for (const p of pts) if (dist(p, q[q.length - 1]) > 0.5) q.push(p);
+    ctx.beginPath();
+    ctx.moveTo(q[0][0], q[0][1]);
+    for (let i = 1; i < q.length - 1; i++) {
+      ctx.arcTo(q[i][0], q[i][1], q[i + 1][0], q[i + 1][1], Math.min(r, dist(q[i - 1], q[i]) / 2, dist(q[i], q[i + 1]) / 2));
+    }
+    ctx.lineTo(q[q.length - 1][0], q[q.length - 1][1]);
+    ctx.stroke();
+  }
+
+  // drawFlows draws the paths in one of two layers. Under the cards, they
+  // show between the declarations of open packages and never cover code;
+  // over the closed packages, they carry stations: a white dot ringed in the
+  // line's color where one path stops, a white disc ringed in ink where
+  // several meet (an interchange) and at a closed package. The layers fade
+  // into each other as the packages open. A path ends at a bar across the
+  // line; drawFlowBadges numbers its start.
+  function drawFlows(open, under) {
+    if (!flows.length) return;
+    const k = under ? open : 1 - open;
+    const lines = flowLines(open);
+    if (!under) flowFrame = lines;
+    if (k < 0.01) return;
+    setScreen();
+    ctx.save();
+    if (under) {
+      // Behind the cards a line stops at each card's edge: the code is not
+      // fully opaque, and a line across it is hard to read through.
+      const z = cam.z;
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      for (const c of cards.values()) {
+        const x = sx(c.x), y = sy(c.y), w = c.w * z, h = c.h * z;
+        if (openOf(c) > 0.01 && x < W && y < H && x + w > 0 && y + h > 0) ctx.rect(x, y, w, h);
+      }
+      ctx.clip("evenodd");
+    }
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const { f, a, w, casing, pts } of lines) {
+      ctx.globalAlpha = a * k;
+      ctx.strokeStyle = C.bg;
+      ctx.lineWidth = w + casing * 2;
+      strokeRounded(pts, 16);
+      ctx.strokeStyle = f.color;
+      ctx.lineWidth = w;
+      strokeRounded(pts, 16);
+      // The end: a bar across the line.
+      const e = pts[pts.length - 1], d = pts[pts.length - 2], l = dist(d, e) || 1;
+      const nx = -(e[1] - d[1]) / l, ny = (e[0] - d[0]) / l, h = w * 1.4;
+      ctx.lineCap = "butt";
+      ctx.beginPath();
+      ctx.moveTo(e[0] - nx * h, e[1] - ny * h);
+      ctx.lineTo(e[0] + nx * h, e[1] + ny * h);
+      ctx.lineWidth = w;
+      ctx.stroke();
+      ctx.lineCap = "round";
+    }
+    ctx.restore();
+    if (under) { ctx.globalAlpha = 1; setWorld(); return; }
+    // Stations: each place once, drawn as strongly as its strongest line.
+    const places = new Map();
+    for (const { f, a, w, st, gap } of lines) for (const s of st) {
+      const p = places.get(s.key) || { s, a: 0, w, gap, colors: new Set(), at: s.at };
+      p.a = Math.max(p.a, a * k);
+      p.colors.add(f.color);
+      if (p.colors.size === 1) p.at = s.at;
+      places.set(s.key, p);
+    }
+    for (const { s, a, w, gap, colors, at } of places.values()) {
+      const k = colors.size, inter = k > 1 || s.hub;
+      const [x, y] = inter ? [s.x, s.y] : at || [s.x, s.y];
+      if (x < -40 || y < -40 || x > W + 40 || y > H + 40) continue;
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(x, y, inter ? Math.max(w + 2, (k * gap) / 2 + 2) : w * 0.7 + 1, 0, Math.PI * 2);
+      ctx.fillStyle = C.panel;
+      ctx.fill();
+      ctx.lineWidth = inter ? 2.5 : 2;
+      ctx.strokeStyle = inter ? C.ink : [...colors][0];
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    setWorld();
+  }
+  // flowFrame holds the paths as drawn this frame, for their badges;
+  // flowBadges holds where each badge was drawn, for the pointer.
+  let flowFrame = [], flowBadges = [];
+
+  // drawFlowBadges numbers each path at its start, after the package labels
+  // so no name plate covers a badge. Paths that start at a closed package
+  // line up under its name plate, and paths that start at an open card line
+  // up on the card's top-left corner. Any other badge sits back along its
+  // line from the start, and steps further back when another is there.
+  function drawFlowBadges() {
+    if (!flows.length || !flowFrame.length) return;
+    setScreen();
+    ctx.font = `700 11px ${SANS}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const placed = [], rows = new Map();
+    flowBadges = [];
+    for (const line of flowFrame) {
+      const s0 = line.st[0], p = s0.hub ? pkgs.get(s0.card.node.package) : null;
+      if (p && p.plate) rows.set(p, [...(rows.get(p) || []), line]);
+    }
+    const badge = (f, a, X, Y) => {
+      placed.push([X, Y]);
+      if (a >= 0.3) flowBadges.push({ f, x: X, y: Y });
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(X, Y, 9, 0, Math.PI * 2);
+      ctx.fillStyle = f.color;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = C.bg;
+      ctx.stroke();
+      ctx.fillStyle = "#fff";
+      ctx.fillText(String(f.id + 1), X, Y + 0.5);
+    };
+    for (const [p, list] of rows) {
+      const b = p.plate, y = b.y + b.h + 12;
+      list.sort((x, y) => x.f.id - y.f.id).forEach((l, i) => badge(l.f, l.a, b.x + b.w / 2 + (i - (list.length - 1) / 2) * 20, y));
+    }
+    const onCard = new Map();
+    for (const { f, a, w, pts, st } of flowFrame) {
+      if (st[0].hub && pkgs.get(st[0].card.node.package)?.plate) continue;
+      const c = st[0].card;
+      if (!st[0].hub && openOf(c) > 0.5) {
+        const i = onCard.get(c) || 0;
+        onCard.set(c, i + 1);
+        const X = sx(c.x) + 4 + i * 20, Y = sy(c.y) - 4;
+        if (X > -20 && Y > -20 && X < W + 20 && Y < H + 20) badge(f, a * c.fade, X, Y);
+        continue;
+      }
+      const p0 = pts[0], p1 = pts.find(p => dist(p, p0) > 1) || [p0[0], p0[1] - 1];
+      const l = dist(p0, p1), ux = (p0[0] - p1[0]) / l, uy = (p0[1] - p1[1]) / l;
+      let back = w + 14, X, Y;
+      do { X = p0[0] + ux * back; Y = p0[1] + uy * back; back += 20; } while (placed.some(q => dist(q, [X, Y]) < 19) && back < 200);
+      badge(f, a, X, Y);
+    }
+    ctx.textAlign = "left";
+    ctx.globalAlpha = 1;
+    setWorld();
+  }
+
+  // flowAt finds the code path whose line passes within a few pixels of a
+  // screen point, drawn strongly enough to see.
+  function flowAt(sx0, sy0) {
+    if (!flows.length) return null;
+    const badge = flowBadges.find(b => Math.hypot(b.x - sx0, b.y - sy0) <= 10);
+    if (badge) return badge.f;
+    // Behind an open card, the card is what the pointer is on.
+    if (lastOpen > 0.5 && pick(sx0, sy0).card) return null;
+    let best = null, bestD = Infinity;
+    for (const { f, a, w, pts } of flowLines(lastOpen)) {
+      if (a < 0.45) continue;
+      for (let i = 1; i < pts.length; i++) {
+        const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], dx = x1 - x0, dy = y1 - y0;
+        const t = clamp(((sx0 - x0) * dx + (sy0 - y0) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+        const d = Math.hypot(x0 + t * dx - sx0, y0 + t * dy - sy0);
+        if (d < w / 2 + 6 && d < bestD) { best = f; bestD = d; }
+      }
+    }
+    return best;
   }
 
   const codeAlpha = c => smooth(CODE_PX[0], CODE_PX[1], c.font * cam.z);
@@ -1142,6 +1432,15 @@ function ZoomMap(canvas, opts) {
       return;
     }
     const r = S.radius;
+    // A dimmed card fades toward the background, but it is not see-through:
+    // edges and code paths behind it would cross its code.
+    if (c.dim < 0.99) {
+      ctx.globalAlpha = fade * lerp(0.35, 1, t1);
+      roundRect(c.x, c.y, c.w, c.h, r);
+      ctx.fillStyle = C.bg;
+      ctx.fill();
+      ctx.globalAlpha = a;
+    }
     roundRect(c.x, c.y, c.w, c.h, r);
     ctx.fillStyle = C.panel;
     ctx.fill();
@@ -1170,9 +1469,11 @@ function ZoomMap(canvas, opts) {
       ctx.translate(c.x, c.y + c.hd / 2);
       ctx.scale(hs, hs);
       ctx.translate(0, -S.header / 2);
-      drawHeader(n, c.w / hs, z * hs);
+      // The header's file and line, in header units, for the pointer.
+      c.locW = drawHeader(n, c.w / hs, z * hs, hoverLoc === c);
+      c.hs = nameA > 0.5 ? hs : 0;
       ctx.restore();
-    }
+    } else c.hs = 0;
     // While the name is too small to read, a card wide enough on the
     // screen shows it in screen pixels, cut to fit.
     const compactA = (1 - nameA) * smooth(34, 56, sw) * smooth(12, 18, c.h * z);
@@ -1231,7 +1532,9 @@ function ZoomMap(canvas, opts) {
 
   // drawHeader draws a card's kind, name, place and badges in card-local
   // units, w wide; z is the zoom those units are drawn at.
-  function drawHeader(n, w, z) {
+  // drawHeader draws a card's header in header units and returns the width
+  // of its file and line, which link to the PR when there is one.
+  function drawHeader(n, w, z, linkHot) {
     ctx.textBaseline = "alphabetic";
     let x = 18;
     const right = w - 14;
@@ -1303,7 +1606,12 @@ function ZoomMap(canvas, opts) {
     const pos = `${n.file}:${n.line}`;
     const room = Math.floor((right - 18) / (S.metaFont * CH)) - prefix.length;
     const loc = room > 1 && pos.length > room ? prefix + "…" + pos.slice(pos.length - room + 1) : prefix + pos;
-    ctx.fillText(ellipsize(loc, Math.floor((right - 18) / (S.metaFont * CH))), 18, 34);
+    const text = ellipsize(loc, Math.floor((right - 18) / (S.metaFont * CH)));
+    if (linkHot) ctx.fillStyle = C.caller;
+    ctx.fillText(text, 18, 34);
+    const tw = ctx.measureText(text).width;
+    if (linkHot) ctx.fillRect(18, 35.5, tw, 0.8);
+    return tw;
   }
 
   // drawBody draws a card's code: colored bars like a minimap when small,
@@ -1710,6 +2018,16 @@ function ZoomMap(canvas, opts) {
   let hoverRef = null;
   // foldAt is the folded row under the pointer, if any.
   let hoverFold = null;
+  // hoverLoc is the card whose header file and line are under the pointer.
+  let hoverLoc = null;
+  // locAt finds the file and line in a card's header under a screen point,
+  // when the header is readable and the map has a link for it.
+  function locAt(c, sx0, sy0) {
+    if (!c.hs || !opts.fileURL || !opts.fileURL(c.node)) return false;
+    const [x, y] = toWorld(sx0, sy0);
+    const lx = (x - c.x) / c.hs, ly = (y - c.y - c.hd / 2) / c.hs + S.header / 2;
+    return lx >= 18 && lx <= 18 + c.locW && ly >= 24 && ly <= 38;
+  }
   function foldAt(c, sx0, sy0) {
     if (!c.folds.size || c.lh * cam.z < 3) return null;
     const [, y] = toWorld(sx0, sy0);
@@ -1842,9 +2160,23 @@ function ZoomMap(canvas, opts) {
       opts.onTip?.(null);
       return;
     }
+    const flow = commentMode ? null : flowAt(e.offsetX, e.offsetY);
+    if ((flow ? flow.id : null) !== hoverFlow) { hoverFlow = flow ? flow.id : null; request(); }
+    if (flow) {
+      canvas.style.cursor = "pointer";
+      opts.onTip?.({ title: `Path ${flow.id + 1}: ${flow.label}`, sub: `${flow.ids.length} steps · click to follow it`, x: e.offsetX, y: e.offsetY });
+      return;
+    }
     const found = pick(e.offsetX, e.offsetY);
     const id = found.card ? found.card.id : null;
     if (id !== hover) { hover = id; request(); }
+    const loc = found.card && !commentMode && locAt(found.card, e.offsetX, e.offsetY) ? found.card : null;
+    if (loc !== hoverLoc) { hoverLoc = loc; request(); }
+    if (loc) {
+      canvas.style.cursor = "pointer";
+      opts.onTip?.({ title: "Open in the pull request", sub: `${loc.node.file}:${loc.node.line}`, x: e.offsetX, y: e.offsetY });
+      return;
+    }
     const fold = found.card && !commentMode ? foldAt(found.card, e.offsetX, e.offsetY) : null;
     if ((fold && fold.card.id + fold.row) !== (hoverFold && hoverFold.card.id + hoverFold.row)) { hoverFold = fold; request(); }
     const lineNo = found.card && !commentMode && !fold ? lineNoAt(found.card, e.offsetX, e.offsetY) : null;
@@ -1893,7 +2225,10 @@ function ZoomMap(canvas, opts) {
       // the list of callers stays open to choose from.
       const port = portAt(e.offsetX, e.offsetY);
       if (port) { if (port.edges.length === 1) opts.onNode?.(port.edges[0].from, true); drag = null; return; }
+      const flow = flowAt(e.offsetX, e.offsetY);
+      if (flow) { opts.onTip?.(null); opts.onFlow?.(flow.id); drag = null; return; }
       const found = pick(e.offsetX, e.offsetY);
+      if (found.card && locAt(found.card, e.offsetX, e.offsetY)) { opts.onTip?.(null); opts.onFile?.(opts.fileURL(found.card.node)); drag = null; return; }
       const fold = found.card ? foldAt(found.card, e.offsetX, e.offsetY) : null;
       if (fold) { unfold(found.card, fold.run); drag = null; return; }
       const lineNo = found.card ? lineNoAt(found.card, e.offsetX, e.offsetY) : null;
@@ -1909,7 +2244,7 @@ function ZoomMap(canvas, opts) {
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointerleave", () => {
-    if (!drag && (hover || hoverRef || hoverPort || hoverLocal || hoverLine)) { hover = null; hoverRef = null; hoverPort = null; hoverLocal = null; hoverLine = null; request(); }
+    if (!drag && (hover || hoverRef || hoverPort || hoverLocal || hoverLine || hoverLoc || hoverFlow !== null)) { hover = null; hoverRef = null; hoverPort = null; hoverLocal = null; hoverLine = null; hoverLoc = null; hoverFlow = null; request(); }
     opts.onTip?.(null);
     opts.onPort?.(null);
   });
@@ -2039,6 +2374,7 @@ function ZoomMap(canvas, opts) {
     setActivePin(id) { activePin = id; request(); },
     setCommentMode(on) { commentMode = on; canvas.style.cursor = on ? "crosshair" : "grab"; },
     setCanAsk(on) { canAsk = on; },
+    setFlow(id) { activeFlow = id; request(); },
     get camera() { return { ...cam }; },
     get level() { return lastLevel; },
     get drawMs() { return drawMs; },

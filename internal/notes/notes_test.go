@@ -15,11 +15,7 @@ func TestCheck(t *testing.T) {
 	n := &Notes{
 		URL:    "javascript:alert(1)",
 		Themes: []Theme{{ID: "t", Nodes: []string{"a.go:A", "a.go:Missing"}, Files: []string{"x.sql", "y.sql"}}},
-		Tour: []Step{
-			{Theme: "t", Nodes: []string{"a.go:B"}},
-			{Theme: "nope"},
-		},
-		Nodes: map[string]string{"a.go:A": "ok", "b.go:C": "gone"},
+		Nodes:  map[string]string{"a.go:A": "ok", "b.go:C": "gone"},
 	}
 
 	got := n.Check(m)
@@ -28,7 +24,6 @@ func TestCheck(t *testing.T) {
 		`nodes: node "b.go:C" is not on the map`,
 		`theme t: file "y.sql" is not changed in this PR`,
 		`theme t: node "a.go:Missing" is not on the map`,
-		`tour step 2: theme "nope" does not exist`,
 		`url: "javascript:alert(1)" is not an http or https link`,
 	}
 	if !slices.Equal(got, want) {

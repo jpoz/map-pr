@@ -1,13 +1,13 @@
 ---
 name: map-pr
-description: Build an interactive, zoomable map of a Go or TypeScript pull request — the declarations it changes (functions, methods, types, constants, variables), the code that uses them, plus Claude-written themes, a guided tour, and per-declaration notes — as one HTML page. Use when the user asks to map, visualize, or explain a PR "as a map", or runs /map-pr with a PR URL, number, or nothing (current branch).
+description: Build an interactive, zoomable map of a Go or TypeScript pull request — the declarations it changes (functions, methods, types, constants, variables), the code that uses them, plus code paths from the entry points, Claude-written themes, and per-declaration notes — as one HTML page. Use when the user asks to map, visualize, or explain a PR "as a map", or runs /map-pr with a PR URL, number, or nothing (current branch).
 argument-hint: "[PR URL | owner/repo#N | N | empty for current branch]"
 ---
 
 # map-pr
 
 `map-pr` (github.com/jpoz/map-pr) finds the changed Go and TypeScript
-declarations and their users with type information. You add the meaning: themes, a tour and notes.
+declarations and their users with type information. You add the meaning: a summary, themes and notes.
 map-pr puts both on one HTML page.
 
 Needs: Go, git, and `gh` (logged in) for PRs on GitHub. For TypeScript or
@@ -76,7 +76,7 @@ Look especially for:
 - **Behavior changes** vs renames and refactors (say which).
 - **Removed safety:** deleted checks, gates, approvals, locks.
 - **Deleted code** — map-pr does not show deleted declarations yet, so name them
-  in the tour text.
+  in the summary.
 - **Entry points** a user or other service reaches: routes, CLI commands, tool
   definitions, workers. Exported functions may have callers outside the repo.
 - **Migrations and rollout:** what happens to existing data, and to old and new
@@ -88,7 +88,7 @@ Look especially for:
 {
   "title": "repo #N · PR title",
   "url": "https://github.com/owner/repo/pull/N (the page title links here; omit when there is no PR)",
-  "summary": "2 short paragraphs: what changes and why, for someone who has not seen the PR.",
+  "summary": "2 short paragraphs: what changes and why, for someone who has not seen the PR. A third may name deleted code.",
   "themes": [
     {
       "id": "short-id",
@@ -96,15 +96,6 @@ Look especially for:
       "summary": "First paragraph shows on the overview. More paragraphs show when the theme is open.",
       "nodes": ["<key from outline>", "..."],
       "files": ["other changed files that belong to this theme"]
-    }
-  ],
-  "tour": [
-    {
-      "title": "Short title",
-      "theme": "short-id (optional)",
-      "body": "What to look at and why. Use **Review here:** or **Check:** for what a reviewer must decide.",
-      "nodes": ["2–6 keys to show for this step"],
-      "files": ["optional"]
     }
   ],
   "nodes": { "<key>": "1–2 sentences on what changed in this function and why it matters." }
@@ -115,18 +106,14 @@ Rules:
 - **Keys** must be copied exactly from the outline (`file:Name`, e.g.
   `internal/store/flow.go:(*Store).Save`).
 - **Files** must be exact paths of files the PR changes or deletes (no notes
-  after the path). The page shows each file's diff: open by default in a tour
-  step with no nodes, on click everywhere else. Use a files-only step for a
-  migration, a query file, or a deleted file whose removed code matters.
+  after the path). The page shows each file's diff on click. Put a migration,
+  a query file, or a deleted file whose removed code matters in its theme.
 - **Themes:** 3–7. Put every changed code declaration into one theme. Order them
   the way the change flows (data → logic → entry points → surfaces).
-- **Tour:** 5–10 steps in reading order. Step 1 is the idea in plain words
-  (no nodes is fine). Step 2 is often where to start: the entry points that reach the
-  most changes (keys from the outline's ENTRY POINTS). Each later step shows a small set of nodes that call each
-  other, so the focused view draws a readable graph. End with what was deleted
-  or what is not on the map.
 - **Node notes:** for the 8–20 declarations that matter most. Start with the kind
   of change in bold when it helps (**Behavior change:**, **Renamed:**, **New:**).
+  Put what a reviewer must decide in the note of the declaration it is about,
+  with **Review here:** or **Check:**.
 - Text supports `` `code` ``, `**bold**` and blank-line paragraphs only.
 - Plain, short sentences. No praise, no filler.
 
@@ -136,14 +123,17 @@ Rules:
 $M -from $OUT/map.json -notes $OUT/notes.json -o $OUT/pr-map.html
 ```
 
-map-pr refuses notes that name a key or theme that is not on the map and lists
+map-pr refuses notes that name a key that is not on the map and lists
 each problem. Fix `notes.json` and run it again until it passes.
 
 If browser tools are available, look at the page through the server from
-step 6 (a browser tool may refuse `file://`) and step through the tour. A step whose declarations sit in
-packages far apart opens at the package level with labeled pins; one in a
-single package opens at the declaration level. Prefer steps of the second
-kind: pick declarations that call each other.
+step 6 (a browser tool may refuse `file://`): open each theme and a few code
+paths.
+
+The page draws code paths by itself: colored lines from each entry point
+down through the calls into the change. When a reader asks how a request
+reaches some code, point them to the path that goes through it
+(`#path=N` in the URL; the declaration's panel lists its paths).
 
 ## 6. Serve it, and answer questions
 

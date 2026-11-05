@@ -46,7 +46,7 @@ func run() error {
 		format    = flag.String("format", "html", "output format: html, json, or outline")
 		out       = flag.String("o", "pr-map.html", `output file ("-" for stdout)`)
 		from      = flag.String("from", "", "read the map from this JSON file instead of analyzing the repository")
-		notesPath = flag.String("notes", "", "JSON file with themes, a tour, and node notes to show on the HTML map")
+		notesPath = flag.String("notes", "", "JSON file with themes and node notes to show on the HTML map")
 		open      = flag.Bool("open", false, "open the HTML map in a browser")
 	)
 	flag.Parse()

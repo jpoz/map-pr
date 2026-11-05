@@ -2,7 +2,9 @@
 package render
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -45,13 +47,39 @@ func HTML(w io.Writer, m *callgraph.Map, n *notes.Notes) error {
 	if err != nil {
 		return err
 	}
+	links, err := json.Marshal(diffIDs(m))
+	if err != nil {
+		return err
+	}
 	// html/template escapes the JSON correctly for a <script> context.
 	return page.Execute(w, map[string]any{
 		"Data":   template.JS(data),
 		"Notes":  template.JS(notesData),
+		"Links":  template.JS(links),
 		"Engine": template.JS(engineJS),
 		"App":    template.JS(appJS),
 	})
+}
+
+// diffIDs gives each changed file its anchor in the file list of a GitHub
+// pull request: "diff-" and the hex SHA-256 of its path. The page links a
+// declaration in a changed file to its diff in the PR with it.
+func diffIDs(m *callgraph.Map) map[string]string {
+	ids := map[string]string{}
+	add := func(path string) {
+		sum := sha256.Sum256([]byte(path))
+		ids[path] = "diff-" + hex.EncodeToString(sum[:])
+	}
+	for path := range m.Patches {
+		add(path)
+	}
+	for path := range m.Stats {
+		add(path)
+	}
+	for _, path := range m.Deleted {
+		add(path)
+	}
+	return ids
 }
 
 // writeEntries lists the entry points: where execution starts and reaches

@@ -6,7 +6,7 @@
     {
       "name": "map-pr",
       "source": "./",
-      "description": "An interactive, zoomable map of a Go pull request, with a tour and notes that Claude writes."
+      "description": "An interactive, zoomable map of a Go pull request, with code paths, and themes and notes that Claude writes."
     }
   ]
 }

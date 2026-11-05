@@ -5,7 +5,7 @@
 Draws a Go or TypeScript pull request as a map you zoom through: the
 declarations the branch changes (functions, methods, types, constants,
 variables), the code that uses them, and the entry points that reach them. With the `/map-pr` skill,
-Claude adds themes, a guided tour and notes, and answers questions you drop on
+Claude adds a summary, themes and notes, and answers questions you drop on
 the map.
 
 **Example:** [the map of map-pr #5](https://www.jpoz.net/map-pr/example/),
@@ -50,7 +50,7 @@ newer Go, build it with that Go: `GOTOOLCHAIN=go1.N.M+auto go install ...`.
 | `-format` | `html` | `html`, `json`, or `outline` (a text view with node keys, for writing notes) |
 | `-o` | `pr-map.html` | output file, `-` for stdout |
 | `-from` | | build from a saved `-format json` map instead of analyzing again |
-| `-notes` | | JSON with themes, a tour, and node notes to show on the page |
+| `-notes` | | JSON with a summary, themes, and node notes to show on the page |
 
 ## TypeScript and JavaScript
 
@@ -133,20 +133,23 @@ top-level code of a TypeScript module, or code with no callers outside tests (us
 up from each declaration on the map to the nearest entry points, through up to
 8 calls that are not on the map. It keeps the fewest entry points that reach
 every change, and adds those to the map with a dashed edge; the panel shows the
-calls in between. The overview lists them under "Walk the code", most changes
-first, and puts routes that reach the same changes in one row. Each
-declaration lists the entry points it is reached from.
+calls in between. Each declaration lists the entry points it is reached from.
 
-## Walking the code
+## Code paths
 
-A walk follows one path of calls, the way a debugger steps into calls. Pick an
-entry point under "Walk the code", or press "Walk the path to here" on any
-function to start at the nearest entry point that reaches it. The panel shows
-the current function, the path so far, and the calls it makes into code on the
-map, numbered in source order; the same numbers mark the call lines in its
-source. ↑ and ↓ choose a call, → or Enter steps into it, ← steps out, and a
-click on a call in the code steps into it. Each step is in the URL
-(`#walk=key > key`), so the browser's back button steps out too.
+A code path is one chain of calls from an entry point down into the change.
+map-pr picks up to 12 of them, so that together they start at each entry point
+and reach every change an entry point reaches. The map draws each path as a
+numbered, colored line through its declarations, like a transit line. When
+paths share a call, their lines run side by side; a declaration on more than
+one path is an interchange, drawn as a white ring. Zoomed out, the lines cross
+the packages, so you see where the paths go and where they meet.
+
+Point at a line to name it, and click it (or pick it under "Code paths" in the
+overview) to follow it. The panel lists every step in call order, with the line
+that makes each call and the other paths that pass through it. ← and → step
+through the path, and the map zooms in to the code of each step. Each path and
+step is in the URL (`#path=2.3`). A declaration lists the paths through it.
 
 ## Long functions
 
@@ -158,14 +161,16 @@ around each of them stay. Click a fold to open it. While a long card's header
 is above the top of the screen, its name stays in a bar at the top, and the
 panel keeps the name in the header of the source.
 
-Calls through an interface do not link, so a chain can end at a "no callers"
-entry point that a real request reaches.
+A call through an interface that the repository declares links to the
+repository's implementations of it, when there are at most 4 (test files do
+not count). A call through any other interface (`io.Writer`, an interface with
+many implementations) does not link, so a chain can end at a "no callers" entry
+point that a real request reaches.
 
-## Notes, themes, and a tour
+## Notes and themes
 
 `-notes notes.json` adds an explanation on top of the map: a summary, themes
-(click one to light up its declarations), a guided tour (arrow keys step through
-it), and a note on any declaration. Notes refer to declarations by the keys that
+(click one to light up its declarations), and a note on any declaration. Notes refer to declarations by the keys that
 `-format outline` prints. map-pr refuses notes that name a key that is not on the
 map. The `/map-pr` skill (`skills/map-pr/`) has Claude write them.
 

@@ -1,9 +1,8 @@
 "use strict";
 // The app joins the zoomable map (engine.js) to the side panel: the summary,
-// themes, the guided tour, declaration details and browser history.
+// themes, code paths, declaration details and browser history.
 const NOTES = window.MAPR_NOTES || {};
 NOTES.themes = NOTES.themes || [];
-NOTES.tour = NOTES.tour || [];
 NOTES.nodes = NOTES.nodes || {};
 const DATA = window.MAPR_DATA;
 
@@ -57,6 +56,32 @@ function callTips(uses) {
   return new Map([...to].map(([l, ds]) => [l, "Calls " + ds.map(d => `${d.name} (${statusLabel(d)})`).join(", ") + ". This line is not changed."]));
 }
 
+// ---------- links to the PR ----------
+
+// A declaration in a file the PR changes links to that file's diff in the
+// PR, at its line when the diff shows the line. Any other file links to its
+// source at the PR's head commit. A map with no GitHub PR link has no links.
+const PR = (NOTES.url || "").match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\/pull\/\d+/);
+const DIFF_IDS = window.MAPR_LINKS || {};
+const diffLines = {};
+// inDiff says whether the diff of file shows line: it is in the new side of one of its hunks.
+function inDiff(file, line) {
+  diffLines[file] ??= [...(PATCHES[file] || "").matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)]
+    .map(m => [+m[1], +m[1] + (m[2] === undefined ? 1 : +m[2]) - 1]);
+  return diffLines[file].some(([a, b]) => line >= a && line <= b);
+}
+function fileURL(file, line) {
+  if (!PR) return null;
+  const id = DIFF_IDS[file];
+  if (id) return `${PR[0]}/files#${id}` + (line && inDiff(file, line) ? "R" + line : "");
+  return `${PR[1]}/blob/${encodeURIComponent(DATA.head)}/${file.split("/").map(encodeURIComponent).join("/")}` + (line ? "#L" + line : "");
+}
+// fileLink is file:line as a link to it in the PR, or as text when there is none.
+function fileLink(file, line) {
+  const text = esc(file) + (line ? ":" + line : ""), url = fileURL(file, line);
+  return url ? `<a class="file-link" href="${esc(url)}" target="_blank" rel="noopener" title="Open in the pull request">${text}</a>` : text;
+}
+
 // ---------- entry points ----------
 
 // Entry points are where execution starts: HTTP handlers, main, functions
@@ -73,8 +98,8 @@ function entryText(e) {
   }
 }
 const entryPill = n => n.entry ? `<span class="entry-pill ${n.entry.kind}">${entryTag(n.entry)}</span>` : "";
-// walk follows edges from id, up to the users or down to what it uses.
-function walk(id, up) {
+// reach follows edges from id, up to the users or down to what it uses.
+function reach(id, up) {
   const seen = new Map([[id, 0]]), queue = [id];
   while (queue.length) {
     const cur = queue.shift();
@@ -89,7 +114,7 @@ function walk(id, up) {
   seen.delete(id);
   return seen;
 }
-const changesReached = id => [...walk(id, false).keys()].filter(x => isChange(byId[x]) && kindOf(byId[x]) !== "type").sort();
+const changesReached = id => [...reach(id, false).keys()].filter(x => isChange(byId[x]) && kindOf(byId[x]) !== "type").sort();
 const entries = nodes.filter(n => n.entry && !n.isTest)
   .map(n => { const ids = changesReached(n.id); return { n, reach: ids.length, sig: n.entry.kind + ":" + ids.join("|") }; })
   .sort((a, b) => (a.n.entry.kind === "root") - (b.n.entry.kind === "root") || b.reach - a.reach || a.n.name.localeCompare(b.n.name));
@@ -159,6 +184,10 @@ const map = ZoomMap(document.getElementById("map"), {
   refsOf: id => (USES[id] || []).flatMap(u => declOf(u.to) ? [{ to: u.to, name: identName(declOf(u.to)), lines: u.lines }] : []),
   onRef: to => refTo(to),
   onPackage: pkg => selectPackage(pkg),
+  onFlow: i => showPath(i),
+  // The file and line in a card's header open the declaration in the PR.
+  fileURL: n => fileURL(n.file, n.line),
+  onFile: url => window.open(url, "_blank", "noopener"),
   onBackground: () => { if (location.hash) home({ fly: false }); },
   onPin: id => { goToThread(id); focusThread(id); },
   onDrop: anchor => { setCommentMode(false); attachTo(anchor); },
@@ -219,35 +248,33 @@ function mapData() {
     tests: testsToggle.checked ? 0 : testUsers(n.id),
     hasNote: !!noteOf(n),
   }));
-  return { nodes: shown, edges, stats: STATS };
+  return { nodes: shown, edges, stats: STATS, flows: codePaths };
 }
 
 // ---------- panel ----------
 
 // codeBlock shows a declaration's source with the lines the change deleted
 // before the line they came before. A deleted row has no .no or .code cell,
-// so those cells stay one per source line. marks numbers the lines of a
-// walk's calls: line to call index. With fold, long runs of unchanged lines
+// so those cells stay one per source line. highlight marks lines such as
+// calls. With fold, long runs of unchanged lines
 // hide behind a row that shows them on a click, as a PR view does; the
 // hidden rows stay in the block, so the cells still match source lines.
-function codeBlock(n, highlight = [], marks = new Map(), fold = true, tips = new Map()) {
+function codeBlock(n, highlight = [], fold = true, tips = new Map()) {
   const changed = new Set(n.changed || []);
   const hl = new Set(highlight);
   const removed = n.removed || {};
   const del = no => (removed[no] || []).map(text =>
     `<span class="ln del"><span class="gone">−</span><span class="old">${esc(text)}</span></span>`).join("");
   const lines = n.source.split("\n");
-  const runs = fold ? foldPlan(n, keepLines(n, [...highlight, ...marks.keys()])) : [];
+  const runs = fold ? foldPlan(n, keepLines(n, highlight)) : [];
   const runOf = no => runs.findIndex(([a, b]) => no >= a && no <= b);
   return `<pre class="src" data-node="${esc(n.id)}">` + lines.map((text, i) => {
     const no = n.line + i, r = runOf(no);
-    const cls = [changed.has(no) && "chg", (hl.has(no) || marks.has(no)) && "hl", r >= 0 && "folded"].filter(Boolean).join(" ");
-    const mark = marks.has(no) ? ` data-call="${marks.get(no)}"` : "";
-    const num = marks.has(no) ? `<span class="call-n">${circled(marks.get(no))}</span>` : "";
+    const cls = [changed.has(no) && "chg", hl.has(no) && "hl", r >= 0 && "folded"].filter(Boolean).join(" ");
     const head = r >= 0 && runs[r][0] === no
       ? `<span class="ln fold" data-fold="${r}">⋯ ${runs[r][1] - no + 1} unchanged lines (${no}–${runs[r][1]}) · click to show</span>` : "";
     const tip = tips.has(no) ? ` title="${esc(tips.get(no))}"` : "";
-    return head + del(no) + `<span class="ln ${cls}"${mark}${tip}${r >= 0 ? ` data-in="${r}"` : ""}><span class="no">${no}</span>${num}<span class="code">${esc(text)}</span></span>`;
+    return head + del(no) + `<span class="ln ${cls}"${tip}${r >= 0 ? ` data-in="${r}"` : ""}><span class="no">${no}</span><span class="code">${esc(text)}</span></span>`;
   }).join("") + del(n.line + lines.length) + "</pre>";
 }
 
@@ -255,7 +282,7 @@ function codeBlock(n, highlight = [], marks = new Map(), fold = true, tips = new
 // place. It sticks to the top of the panel, so a long function keeps its
 // name in view.
 const srcHead = (d, extra = "") =>
-  `<div class="src-path"><span class="kind">${esc(kindOf(d))}</span> <b>${esc(d.name)}</b> · ${esc(d.file)}:${d.line}${extra}</div>`;
+  `<div class="src-path"><span class="kind">${esc(kindOf(d))}</span> <b>${esc(d.name)}</b> · ${fileLink(d.file, d.line)}${extra}</div>`;
 
 const badge = n => `<span class="badge ${n.status}">${statusLabel(n)}</span>`;
 const kindTag = n => `<span class="kind">${kindOf(n)}</span>`;
@@ -266,7 +293,7 @@ function linkList(items) {
     `<li data-id="${esc(id)}">${text}</li>`).join("")}</ul>`;
 }
 
-// nodeList shows nodes with their notes, for theme and tour panels.
+// nodeList shows nodes with their notes, for theme panels.
 function nodeList(keys) {
   return linkList(keys.filter(k => idOf[k]).map(k => {
     const n = byId[idOf[k]];
@@ -292,7 +319,7 @@ function patchBlock(patch) {
 }
 
 // fileList shows each file's diff in a section that opens on click.
-function fileList(title, files, open = false) {
+function fileList(title, files) {
   if (!files || !files.length) return "";
   return `<h3>${title}</h3>` + files.map(f => {
     const patch = PATCHES[f];
@@ -300,7 +327,7 @@ function fileList(title, files, open = false) {
     const counts = st ? ` <span class="add-count">+${st.added}</span> <span class="del-count">−${st.deleted}</span>` : "";
     const label = `${esc(f)}${deletedFiles.has(f) ? ` <span class="badge deleted">deleted</span>` : ""}${counts}`;
     if (!patch) return `<div class="file"><div class="file-name">${label}</div></div>`;
-    return `<details class="file" data-file="${esc(f)}" ${open ? "open" : ""}><summary class="file-name">${label}</summary>` +
+    return `<details class="file" data-file="${esc(f)}"><summary class="file-name">${label}</summary>` +
       `<div class="diff-view">${patchBlock(patch)}</div></details>`;
   }).join("");
 }
@@ -362,31 +389,27 @@ function linkRefs(pre) {
 
 // openDecl shows a declaration: on the map if it is there, else its definition.
 const openDecl = id => byId[id] ? selectNode(id) : showDef(id);
-// refTo follows a name in code. In a walk, a call steps into it.
-function refTo(id) {
-  const i = walkPath ? callsOf(walkPath[walkPath.length - 1]).findIndex(c => c.to === id) : -1;
-  if (i >= 0) stepInto(i); else openDecl(id);
-}
+// refTo follows a name in code.
+const refTo = id => openDecl(id);
 
 // showDef shows the definition of code the PR does not change, with the
 // declarations on this map that use it.
 function showDef(id) {
   const d = DEFS[id];
   if (!d) return;
-  tourStep = -1;
-  walkPath = null;
+  leavePath();
   const users = usersOfDecl(id).filter(x => declOf(x));
   const total = d.endLine - d.line + 1, shown = d.source.split("\n").length;
   setPanel(`
     <span class="back" data-back>← Back</span>
     <h2><span class="kind">${esc(d.kind)}</span> ${esc(d.name)}</h2>
     <span class="badge unchanged">not changed in this PR</span>
-    <div class="loc">${esc(d.file)}:${d.line}</div>
+    <div class="loc">${fileLink(d.file, d.line)}</div>
     <h3>Used here by</h3>
     ${linkList(users.map(x => [x, `<span class="name">${byId[x] ? badge(byId[x]) + " " : ""}<span class="kind">${esc(declOf(x).kind)}</span> ${esc(declOf(x).name)}</span> <span class="loc">${esc(declOf(x).file)}</span>`]))}
     <h3>Definition</h3>
     ${srcHead(d)}
-    ${codeBlock(d, [], new Map(), false)}
+    ${codeBlock(d, [], false)}
     ${shown < total ? `<p class="empty">The first ${shown} of ${total} lines. The rest is in the file.</p>` : ""}`);
   record("def=" + id);
 }
@@ -426,11 +449,9 @@ panel.addEventListener("click", e => {
   if (ref) { e.preventDefault(); refTo(ref.dataset.ref); }
 });
 
-// setPanel fills the side panel. A wide panel gives diffs room in a step
-// that shows only files.
-function setPanel(html, wide = false) {
+// setPanel fills the side panel.
+function setPanel(html) {
   map.setActivePin(null);
-  panel.classList.toggle("wide", wide);
   panel.innerHTML = html;
   panel.scrollTop = 0;
   for (const li of panel.querySelectorAll("li[data-id], li.group > div[data-id]")) li.onclick = () => openDecl(li.dataset.id);
@@ -438,16 +459,9 @@ function setPanel(html, wide = false) {
   for (const pre of panel.querySelectorAll("pre.src[data-node]")) linkRefs(pre);
   for (const li of panel.querySelectorAll("li[data-theme]")) li.onclick = () => showTheme(li.dataset.theme);
   for (const li of panel.querySelectorAll("li[data-pkg]")) li.onclick = () => selectPackage(li.dataset.pkg);
-  for (const b of panel.querySelectorAll("[data-step]")) b.onclick = () => showStep(+b.dataset.step);
   for (const b of panel.querySelectorAll("[data-home]")) b.onclick = () => home();
   for (const b of panel.querySelectorAll("[data-code]")) b.onclick = () => map.showCode(b.dataset.code);
-  for (const b of panel.querySelectorAll("[data-walk]")) b.onclick = () => walkFrom(b.dataset.walk);
-  for (const b of panel.querySelectorAll("[data-entries]")) b.onclick = () => {
-    const ids = entries.map(x => x.n.id);
-    map.select(null);
-    map.setFocus({ ids, color: cssVar("--entry") });
-    map.showIds(ids);
-  };
+  for (const b of panel.querySelectorAll("[data-path]")) b.onclick = () => showPath(+b.dataset.path);
   for (const li of panel.querySelectorAll("li[data-thread]")) li.onclick = () => focusThread(li.dataset.thread);
   for (const b of panel.querySelectorAll("[data-ask]")) b.onclick = () => attachTo({ node: b.dataset.ask, line: 0 });
   if (comments.on) {
@@ -498,7 +512,7 @@ function showNode(id) {
     (viaEdges.length ? `<p class="empty">Reaches the changes through code that is not on the map:</p>` +
       linkList(viaEdges.map(e => [e.to, `<span class="path">${esc(n.name)} → ${e.via.map(v => esc(v) + " → ").join("")}</span>` +
         `<span class="name">${kindTag(byId[e.to])} ${esc(byId[e.to].name)}</span>`])) : "") : "";
-  const from = [...walk(id, true)].filter(([x]) => byId[x].entry).sort((a, b) => a[1] - b[1]);
+  const from = [...reach(id, true)].filter(([x]) => byId[x].entry).sort((a, b) => a[1] - b[1]);
   const reachedFrom = !n.entry || n.status !== "entry" ? `<h3>Reached from</h3>` + (from.length
     ? linkList(from.slice(0, 12).map(([x, hops]) => [x, `<span class="name">${entryPill(byId[x])} ${esc(byId[x].name)}</span>` +
       ` <span class="loc">${esc(byId[x].entry.kind === "http" && byId[x].entry.routes ? byId[x].entry.routes[0] : entryText(byId[x].entry))} · ${hops} call${hops === 1 ? "" : "s"} up</span>`])) +
@@ -509,11 +523,11 @@ function showNode(id) {
     <span class="back" data-home>← Overview</span>
     <h2>${kindTag(n)} ${esc(n.name)}</h2>
     ${badge(n)} ${entryPill(n)} ${exported}
-    ${isCode(n) && !n.isTest ? `<div class="tour-nav"><button class="primary" data-walk="${esc(id)}">${n.entry ? "Walk from here" : "Walk the path to here"} →</button></div>` : ""}
-    <div class="loc">${esc(n.package)}<br>${esc(n.file)}:${n.line}</div>
+    <div class="loc">${esc(n.package)}<br>${fileLink(n.file, n.line)}</div>
     ${note ? `<div class="note">${md(note)}</div>` : ""}
     ${themes ? `<h3>Part of</h3><ul class="links themes">${themes}</ul>` : ""}
     ${entryInfo}
+    ${pathsThrough(id).length ? `<h3>Code paths through here</h3><ul class="links">${pathsThrough(id).map(pathRow).join("")}</ul>` : ""}
     ${reachedFrom}
     <h3>Uses these changes</h3>
     ${linkList(uses.filter(e => !viaEdges.includes(e)).map(e => [e.to, `<span class="name">${kindTag(byId[e.to])} ${esc(byId[e.to].name)}</span> <span class="loc">${where(e, "line ")}</span>`]))}
@@ -529,14 +543,13 @@ function showNode(id) {
     <div class="questions" data-for="${esc(n.key)}">${threadList(threadsAt(n.key))}</div>` : ""}
     <h3>Source <button class="mini" data-code="${esc(id)}">Zoom to code</button></h3>
     ${srcHead(n, comments.on ? ` <span class="hint">· click a line number to ask Claude about it</span>` : "")}
-    ${codeBlock(n, uses.flatMap(e => e.lines || []), new Map(), true, callTips(uses))}`);
+    ${codeBlock(n, uses.flatMap(e => e.lines || []), true, callTips(uses))}`);
 }
 
 // selectNode shows a declaration. From the panel or a link the map flies to
 // it with its neighbors; a click on the map leaves the camera alone.
 function selectNode(id, { fly = true } = {}) {
-  tourStep = -1;
-  walkPath = null;
+  leavePath();
   ensureShown([id]);
   map.setFocus(null);
   map.select(id);
@@ -547,181 +560,143 @@ function selectNode(id, { fly = true } = {}) {
   record("node=" + byId[id].key);
 }
 
-// ---------- walk ----------
+// ---------- code paths ----------
 
-// A walk follows one path of calls through the change, the way a debugger
-// steps into calls: from an entry point, each function lists the calls it
-// makes into code on the map, in source order, and the reader steps into
-// one. walkPath holds the functions from the start of the walk to the
-// current one; walkCursor is the chosen call of the current one.
-let walkPath = null, walkCursor = 0;
+// A code path is one chain of calls from an entry point down to a change
+// that calls nothing more on the map. The map draws each path as a colored
+// line through its declarations, like a transit line: where lines share a
+// declaration, the paths meet. A few paths are picked so that together they
+// reach every change an entry point reaches, and start at every entry point.
+const PATH_COLORS = ["#e03131", "#1971c2", "#2f9e44", "#f08c00", "#9c36b5", "#0c8599", "#d6336c", "#5c940d", "#e8590c", "#3b5bdb", "#862e9c", "#495057"];
+const MAX_PATHS = 12;
 const isCode = n => !["const", "var", "type", "sql"].includes(kindOf(n));
-
-// callsOf lists the calls a function makes into code on the map, one per
-// callee, in the order of the first line that calls it. Calls that go
-// through code not on the map, from an entry point, come last.
-function callsOf(id) {
-  const out = new Map();
-  for (const e of edges) {
-    if (e.from !== id || !byId[e.to] || byId[e.to].isTest || !isCode(byId[e.to])) continue;
-    const c = out.get(e.to) || { to: e.to, lines: [], via: e.via };
-    c.lines.push(...(e.lines || []));
-    out.set(e.to, c);
-  }
-  const first = c => c.lines.length ? Math.min(...c.lines) : Infinity;
-  return [...out.values()].sort((a, b) => first(a) - first(b) || byId[a.to].name.localeCompare(byId[b.to].name));
+const calleesOf = new Map();
+for (const e of edges) {
+  const t = byId[e.to];
+  if (!t || t.isTest || !isCode(t) || byId[e.from].isTest) continue;
+  const list = calleesOf.get(e.from) || [];
+  if (!list.includes(e.to)) list.push(e.to);
+  calleesOf.set(e.from, list);
 }
 
-// pathFromEntry finds the shortest chain of calls from an entry point to id,
-// or null. An entry point with real callers outside the map (HTTP, go, main)
-// wins over one that only has no callers.
-function pathFromEntry(id) {
-  const parent = new Map([[id, null]]), queue = [id], found = [];
-  while (queue.length) {
-    const cur = queue.shift();
-    if (byId[cur].entry) found.push(cur);
-    for (const e of edges) {
-      if (e.to !== cur || parent.has(e.from) || byId[e.from].isTest) continue;
-      parent.set(e.from, cur);
-      queue.push(e.from);
+// pathsFrom lists the chains of calls from id to each end, at most limit.
+function pathsFrom(id, limit = 400) {
+  const out = [], path = [id];
+  (function dfs(cur) {
+    const next = (calleesOf.get(cur) || []).filter(x => !path.includes(x));
+    if (!next.length) { if (path.length > 1) out.push([...path]); return; }
+    for (const x of next) {
+      if (out.length >= limit) return;
+      path.push(x);
+      dfs(x);
+      path.pop();
     }
-  }
-  const start = found.find(x => byId[x].entry.kind !== "root") || found[0];
-  if (!start) return null;
-  const path = [];
-  for (let x = start; x; x = parent.get(x)) path.push(x);
-  return path;
+  })(id);
+  return out;
 }
 
-// changeIn says how much of a callee the PR changes.
-const changeIn = t => t.status === "added" ? "new in this PR"
-  : t.status === "modified" ? `${(t.changed || []).length} of ${t.endLine - t.line + 1} lines changed in it`
-  : "not changed; it calls changed code";
-// isNewCall says whether the PR wrote the call itself, or only changed the
-// code it calls.
-const isNewCall = (n, c) => c.lines.some(l => (n.changed || []).includes(l));
+const codePaths = (() => {
+  const cands = entryGroups.flatMap(g => pathsFrom(g[0].n.id));
+  const covered = new Set(), started = new Set(), out = [];
+  while (out.length < MAX_PATHS) {
+    let best = null, bestGain = 0;
+    for (const p of cands) {
+      // A path from code with no callers counts half: a route or a worker
+      // shows how execution really gets there.
+      const weight = byId[p[0]].entry.kind === "root" ? 0.5 : 1;
+      const gain = weight * (2 * p.filter(x => isChange(byId[x]) && !covered.has(x)).length + (started.has(p[0]) ? 0 : 1));
+      if (gain > bestGain || gain > 0 && gain === bestGain && p.length < best.length) { best = p; bestGain = gain; }
+    }
+    if (!best) break;
+    for (const x of best) covered.add(x);
+    started.add(best[0]);
+    out.push(best);
+  }
+  return out.map((ids, i) => {
+    const start = byId[ids[0]], end = byId[ids[ids.length - 1]];
+    // Top-level code has no name of its own, so its file names it.
+    const from = start.entry && start.entry.kind === "http" && start.entry.routes ? start.entry.routes[0]
+      : start.entry && start.entry.kind === "module" ? start.file.split("/").pop() : start.name;
+    return { id: i, ids, color: PATH_COLORS[i % PATH_COLORS.length], label: `${from} → ${end.name}`, changes: ids.filter(x => isChange(byId[x])).length };
+  });
+})();
+const pathsThrough = id => codePaths.filter(p => p.ids.includes(id));
+const pathChip = p => `<span class="path-chip" style="background:${p.color}">${p.id + 1}</span>`;
 
-const circled = i => i < 20 ? String.fromCodePoint(0x2460 + i) : `(${i + 1})`;
+// pathView is the open path and its current station, or null.
+let pathView = null;
 
-function showWalk(path, cursor = 0) {
-  tourStep = -1;
-  walkPath = path;
-  const id = path[path.length - 1], n = byId[id];
-  const calls = callsOf(id);
-  walkCursor = clamp(cursor, 0, Math.max(0, calls.length - 1));
-  ensureShown(path);
-  map.setFocus({ ids: path, color: cssVar("--entry") });
-  map.select(id);
-  map.showCode(id, calls[walkCursor] && Math.min(...calls[walkCursor].lines));
+// callFrom says how station a calls station b: the lines of the call, or the
+// code off the map in between.
+function callFrom(a, b) {
+  const es = edges.filter(e => e.from === a && e.to === b);
+  const via = es.find(e => e.via);
+  if (via) return `through ${via.via.length ? via.via.map(esc).join(" → ") : "a direct call"}`;
+  const n = byId[a], lines = [...new Set(es.flatMap(e => e.lines || []))].sort((x, y) => x - y);
+  if (!lines.length) return "";
+  const src = (n.source || "").split("\n")[lines[0] - n.line];
+  return `line ${lines.join(", ")}` + (src ? `: <code>${esc(src.trim())}</code>` : "");
+}
 
-  const note = noteOf(n);
-  const trail = path.map((x, i) => `<li data-walk-to="${i}" class="${i === path.length - 1 ? "here" : ""}">` +
-    `${i ? "<span class=\"arrow\">↳</span> " : ""}${i === 0 ? entryPill(byId[x]) + " " : ""}<span class="name">${esc(byId[x].name)}</span></li>`).join("");
-  // When the walk does not start at an entry point, offer the path from one,
-  // or else the callers to step back to.
-  const head = byId[path[0]];
-  const fromEntry = head.entry ? null : pathFromEntry(path[0]);
-  const callers = head.entry ? [] : edges.filter(e => e.to === path[0] && !byId[e.from].isTest);
-  const start = fromEntry
-    ? `<div class="walk-start"><p class="empty">This walk does not start at an entry point. Execution reaches it from
-       ${entryPill(byId[fromEntry[0]])} <b>${esc(byId[fromEntry[0]].name)}</b>, ${fromEntry.length - 1} call${fromEntry.length === 2 ? "" : "s"} up.</p>
-       <button data-walk-entry>Walk from ${esc(byId[fromEntry[0]].name)}</button></div>`
-    : !head.entry && callers.length ? `<div class="walk-start"><p class="empty">Called by:</p>${linkList(callers.map(e =>
-      [e.from, `<span class="name">${kindTag(byId[e.from])} ${esc(byId[e.from].name)}</span> <span class="loc">${esc(byId[e.from].file)}</span>`]))}</div>` : "";
+// showPath shows one code path: the map lights its line, and the panel lists
+// its stations in call order. With at, the map zooms in to that station's
+// code, at the line that calls the next one.
+function showPath(i, at = null) {
+  const p = codePaths[i];
+  if (!p) return home();
+  at = at === null ? null : clamp(at, 0, p.ids.length - 1);
+  pathView = { i, at };
+  map.setFlow(i);
+  map.setFocus({ ids: p.ids, color: p.color });
+  const cur = at === null ? null : p.ids[at];
+  map.select(cur);
+  const callLines = j => j < p.ids.length - 1
+    ? edges.filter(e => e.from === p.ids[j] && e.to === p.ids[j + 1]).flatMap(e => e.lines || []) : [];
+  if (cur) map.showCode(cur, callLines(at)[0]); else map.showIds(p.ids);
 
-  const rows = calls.map((c, i) => {
-    const t = byId[c.to], reach = changesReached(c.to).length, again = path.includes(c.to);
-    const at = c.via ? `through ${c.via.length ? c.via.map(esc).join(" → ") : "a direct call"}` : `line ${[...new Set(c.lines)].sort((a, b) => a - b).join(", ")}`;
-    const call = c.via ? "" : isNewCall(n, c) ? `<span class="call-kind new">new call</span>` : `<span class="call-kind">existing call</span>`;
-    return `<li data-call="${i}" class="${i === walkCursor ? "cur" : ""}"><span class="num">${circled(i)}</span><div>` +
-      `<span class="name">${kindTag(t)} ${esc(t.name)}</span> ${call}` +
-      `<div class="loc">${at} · ${changeIn(t)}${reach ? ` · reaches ${reach} more change${reach === 1 ? "" : "s"}` : ""}${again ? " · already on this path" : ""}</div>` +
-      (noteOf(t) ? `<div class="note small">${md(noteOf(t))}</div>` : "") + `</div></li>`;
+  const start = byId[p.ids[0]];
+  const stations = p.ids.map((id, j) => {
+    const n = byId[id], others = pathsThrough(id).filter(o => o !== p);
+    const call = j < p.ids.length - 1 ? callFrom(id, p.ids[j + 1]) : "";
+    return `<li data-station="${j}" class="${j === at ? "cur" : ""}${others.length ? " interchange" : ""}"><div>` +
+      `<span class="name">${badge(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
+      `<div class="loc">${fileLink(n.file, n.line)}</div>` +
+      (noteOf(n) ? `<div class="note small">${md(noteOf(n))}</div>` : "") +
+      (call ? `<div class="call">calls ${esc(byId[p.ids[j + 1]].name)} at ${call}</div>` : "") +
+      (others.length ? `<div class="also">Also on ${others.map(o => `<span data-path="${o.id}" title="${esc(o.label)}">${pathChip(o)}</span>`).join(" ")}</div>` : "") +
+      `</div></li>`;
   }).join("");
-  const marks = new Map();
-  calls.forEach((c, i) => { for (const l of c.lines) if (!marks.has(l)) marks.set(l, i); });
-
+  const here = cur && byId[cur];
   setPanel(`
     <span class="back" data-home>← Overview</span>
-    <div class="walk-head"><span class="count">Walk · ${path.length} deep</span>
-      <button data-walk-out ${path.length < 2 ? "disabled" : ""}>← Out</button>
-      <button class="primary" data-walk-in ${calls.length ? "" : "disabled"}>Into ${calls.length ? circled(walkCursor) : ""} →</button></div>
-    <ol class="trail">${trail}</ol>
-    ${start}
-    <h2>${kindTag(n)} ${esc(n.name)}</h2>
-    ${badge(n)} ${entryPill(n)}
-    <div class="loc">${esc(n.file)}:${n.line}</div>
-    ${n.entry && path.length === 1 ? `<p class="empty">${esc(entryText(n.entry))}</p>` : ""}
-    ${note ? `<div class="note">${md(note)}</div>` : ""}
-    <h3>Calls into the change, in order</h3>
-    ${calls.length
-      ? `<ol class="calls">${rows}</ol><p class="hint">↑ ↓ choose a call · → or Enter step into it · ← step out · or click a call in the code</p>`
-      : `<p class="empty">It calls no more code on the map: this path ends here. Press ← to go back and take another call.</p>`}
-    <h3>Source</h3>
-    ${srcHead(n)}
-    ${codeBlock(n, [], marks)}`);
-  for (const li of panel.querySelectorAll("li[data-call]")) {
-    li.onclick = () => stepInto(+li.dataset.call);
-    li.onmouseenter = () => markCall(+li.dataset.call, false);
-  }
-  for (const li of panel.querySelectorAll("li[data-walk-to]")) li.onclick = () => showWalk(walkPath.slice(0, +li.dataset.walkTo + 1));
-  for (const li of panel.querySelectorAll(".walk-start li[data-id]")) li.onclick = () => showWalk([li.dataset.id, ...walkPath]);
-  const b = sel => panel.querySelector(sel);
-  if (b("[data-walk-entry]")) b("[data-walk-entry]").onclick = () => showWalk([...fromEntry.slice(0, -1), ...walkPath]);
-  b("[data-walk-out]").onclick = stepOut;
-  b("[data-walk-in]").onclick = () => stepInto(walkCursor);
-  // A call line says why it is marked: the call may be old, with the change
-  // inside the code it calls.
-  for (const ln of panel.querySelectorAll("pre.src .ln[data-call]")) {
-    const c = calls[+ln.dataset.call], t = byId[c.to];
-    ln.title = `${circled(+ln.dataset.call)} calls ${t.name}: ${changeIn(t)}. ` +
-      (isNewCall(n, c) ? "This PR adds or changes this call." : "This line did not change; the change is inside the code it calls.");
-  }
-  markCall(walkCursor, false);
-  record("walk=" + path.map(x => byId[x].key).join(" > "));
+    <div class="path-nav">
+      <span class="count">${pathChip(p)} Path ${i + 1} of ${codePaths.length} · ${at === null ? `${p.ids.length} steps` : `step ${at + 1} of ${p.ids.length}`}</span>
+      <button data-path-at="${at === null ? -1 : at - 1}" ${at === null ? "disabled" : ""}>← Back</button>
+      <button class="primary" data-path-at="${at === null ? 0 : at + 1}" ${at === p.ids.length - 1 ? "disabled" : ""}>${at === null ? "Start" : "Next"} →</button>
+    </div>
+    <h2>${esc(p.label)}</h2>
+    <p class="empty">${entryPill(start)} ${start.entry ? esc(entryText(start.entry)) : ""}. Reaches ${p.changes} change${p.changes === 1 ? "" : "s"}.</p>
+    <ol class="stations" style="--path:${p.color}">${stations}</ol>
+    <p class="hint">← → step through the path · click a step to go to its code</p>
+    ${here ? `<h3>Source <button class="mini" data-code="${esc(cur)}">Zoom to code</button></h3>
+    ${srcHead(here)}
+    ${codeBlock(here, callLines(at))}` : ""}`);
+  for (const li of panel.querySelectorAll("li[data-station]")) li.onclick = e => { if (!e.target.closest("[data-path], a")) showPath(i, +li.dataset.station); };
+  for (const b of panel.querySelectorAll("[data-path-at]")) b.onclick = () => showPath(i, +b.dataset.pathAt < 0 ? null : +b.dataset.pathAt);
+  panel.querySelector("li.cur")?.scrollIntoView({ block: "nearest" });
+  record("path=" + (i + 1) + (at === null ? "" : "." + (at + 1)));
 }
 
-// markCall chooses a call: its row and its lines in the source light up.
-function markCall(i, scroll = true) {
-  if (!walkPath) return;
-  walkCursor = i;
-  for (const li of panel.querySelectorAll("li[data-call]")) li.classList.toggle("cur", +li.dataset.call === i);
-  let first = null;
-  for (const ln of panel.querySelectorAll("pre.src .ln[data-call]")) {
-    const on = +ln.dataset.call === i;
-    ln.classList.toggle("on", on);
-    if (on && !first) first = ln;
-  }
-  const into = panel.querySelector("[data-walk-in]");
-  if (into && !into.disabled) into.textContent = `Into ${circled(i)} →`;
-  if (scroll && first) {
-    first.scrollIntoView({ block: "nearest" });
-    map.showCode(walkPath[walkPath.length - 1], +first.querySelector(".no").textContent);
-  }
-}
-
-function stepInto(i) {
-  const calls = callsOf(walkPath[walkPath.length - 1]);
-  if (!calls[i]) return;
-  showWalk([...walkPath, calls[i].to]);
-}
-
-// stepOut goes back to the caller, with the call it came from chosen.
-function stepOut() {
-  if (!walkPath || walkPath.length < 2) return;
-  const from = walkPath[walkPath.length - 1], path = walkPath.slice(0, -1);
-  showWalk(path, callsOf(path[path.length - 1]).findIndex(c => c.to === from));
-}
-
-// walkFrom starts a walk at id: from its entry point when it has one.
-function walkFrom(id) {
-  showWalk(byId[id].entry ? [id] : pathFromEntry(id) || [id]);
+// leavePath clears a path's light when another view opens.
+function leavePath() {
+  if (!pathView) return;
+  pathView = null;
+  map.setFlow(null);
 }
 
 function showTheme(themeId) {
   const t = themeById[themeId];
-  tourStep = -1;
-  walkPath = null;
+  leavePath();
   const ids = (t.nodes || []).map(k => idOf[k]).filter(Boolean);
   ensureShown(ids);
   map.select(null);
@@ -737,42 +712,8 @@ function showTheme(themeId) {
   record("theme=" + themeId);
 }
 
-let tourStep = -1;
-
-function showStep(i) {
-  const steps = NOTES.tour;
-  if (i < 0 || i >= steps.length) return;
-  tourStep = i;
-  walkPath = null;
-  const s = steps[i];
-  const t = themeById[s.theme];
-  const ids = (s.nodes || []).map(k => idOf[k]).filter(Boolean);
-  ensureShown(ids);
-  map.select(null);
-  if (ids.length) {
-    map.setFocus({ ids, color: t ? t.color : cssVar("--note-line") });
-    map.showIds(ids);
-  } else {
-    map.setFocus(null);
-    map.fit();
-  }
-  setPanel(`
-    <span class="back" data-home>← Overview</span>
-    <div class="tour-nav">
-      <span class="count">Step ${i + 1} of ${steps.length}${t ? ` · <span class="chip" style="background:${t.color}"></span>${esc(t.title)}` : ""}</span>
-      <button data-step="${i - 1}" ${i === 0 ? "disabled" : ""}>← Back</button>
-      <button class="primary" data-step="${i + 1}" ${i === steps.length - 1 ? "disabled" : ""}>Next →</button>
-    </div>
-    <h2>${esc(s.title)}</h2>
-    <div class="prose">${md(s.body)}</div>
-    ${(s.nodes || []).length ? `<h3>On the map</h3>${nodeList(s.nodes)}` : ""}
-    ${fileList("Files", s.files, !(s.nodes || []).length)}`, !(s.nodes || []).length && (s.files || []).length > 0);
-  record("step=" + (i + 1));
-}
-
 function home({ fly = true } = {}) {
-  tourStep = -1;
-  walkPath = null;
+  leavePath();
   map.select(null);
   map.setFocus(null);
   if (fly) map.fit();
@@ -783,8 +724,7 @@ function home({ fly = true } = {}) {
 // selectPackage shows one package: the map flies to it and the panel lists
 // what changed in it.
 function selectPackage(pkg) {
-  tourStep = -1;
-  walkPath = null;
+  leavePath();
   const ns = nodes.filter(n => n.package === pkg && (testsToggle.checked || !n.isTest));
   if (!ns.length) return home();
   map.select(null);
@@ -809,7 +749,7 @@ function selectPackage(pkg) {
   record("pkg=" + pkg);
 }
 
-// Each view has a URL hash (#step=N, #theme=ID, #node=KEY, #pkg=PATH, or none
+// Each view has a URL hash (#path=N, #theme=ID, #node=KEY, #pkg=PATH, or none
 // for the overview), so the browser's back and forward buttons move between
 // views and a link can open one.
 let restoring = false;
@@ -827,13 +767,15 @@ function route() {
   const [kind, value] = [view.slice(0, view.indexOf("=")), view.slice(view.indexOf("=") + 1)];
   restoring = true;
   try {
-    if (kind === "step" && NOTES.tour[+value - 1]) showStep(+value - 1);
-    else if (kind === "theme" && themeById[value]) showTheme(value);
+    if (kind === "theme" && themeById[value]) showTheme(value);
     else if (kind === "node" && idOf[value]) selectNode(idOf[value]);
     else if (kind === "pkg" && nodes.some(n => n.package === value)) selectPackage(value);
     else if (kind === "thread" && comments.threads.some(t => t.id === value)) { goToThread(value); focusThread(value); }
     else if (kind === "def" && DEFS[value]) showDef(value);
-    else if (kind === "walk" && value.split(" > ").every(k => idOf[k])) showWalk(value.split(" > ").map(k => idOf[k]));
+    else if (kind === "path" && codePaths[+value.split(".")[0] - 1]) {
+      const [i, at] = value.split(".");
+      showPath(+i - 1, at ? +at - 1 : null);
+    }
     else home();
   } finally {
     restoring = false;
@@ -863,18 +805,9 @@ function showSummary() {
 
   setPanel(`
     ${NOTES.summary ? `<div class="prose">${md(NOTES.summary)}</div>` : ""}
-    ${NOTES.tour.length ? `<div class="tour-nav"><button class="primary" data-step="0">Start the tour (${NOTES.tour.length} steps) →</button></div>` : ""}
-    ${entries.length ? `<h3>Walk the code <button class="mini" data-entries>Show on map</button></h3>
-    <p class="empty">Where execution starts and reaches the changes, most changes first. Pick one to step through its calls into the change, one function at a time.</p>
-    <ul class="links">${entryGroups.map(group => {
-      const row = ({ n, reach }, more) => `<span class="name">${entryPill(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
-        ` <span class="loc">${n.entry.kind === "http" && n.entry.routes ? esc(n.entry.routes[0]) : esc(n.file)} · reaches ${reach} change${reach === 1 ? "" : "s"}${more}</span>`;
-      const [first, ...rest] = group;
-      if (!rest.length) return `<li data-walk="${esc(first.n.id)}">${row(first, "")}</li>`;
-      return `<li class="group"><div data-walk="${esc(first.n.id)}">${row(first, "")}</div>
-        <details><summary>${rest.length} more ${first.n.entry.kind === "http" ? "routes" : "entry points"} that reach the same changes</summary>
-        <ul class="links">${rest.map(x => `<li data-walk="${esc(x.n.id)}">${row(x, "")}</li>`).join("")}</ul></details></li>`;
-    }).join("")}</ul>` : ""}
+    ${codePaths.length ? `<h3>Code paths</h3>
+    <p class="empty">Chains of calls from where execution starts down into the change, drawn as colored lines on the map. Where lines meet, the paths share code. Pick one to follow it step by step.</p>
+    <ul class="links">${codePaths.map(pathRow).join("")}</ul>` : ""}
     ${startHere}
     ${themes ? `<h3>Themes</h3><ul class="links themes">${themes}</ul>` : ""}
     <h3>Changed code</h3>
@@ -883,6 +816,10 @@ function showSummary() {
     ${fileList("Other changed files", DATA.otherFiles)}
     ${fileList("Deleted files", DATA.deleted)}`);
 }
+
+// pathRow is a code path in a list.
+const pathRow = p => `<li data-path="${p.id}"><span class="name">${pathChip(p)} ${esc(p.label)}</span>` +
+  ` <span class="loc">${p.ids.length} steps · ${p.changes} change${p.changes === 1 ? "" : "s"}</span></li>`;
 
 // ---------- comments ----------
 
@@ -1180,18 +1117,12 @@ async function startComments() {
 
 document.addEventListener("keydown", evt => {
   if (evt.target.closest("input, textarea") || evt.metaKey || evt.ctrlKey) return;
-  if (walkPath) {
-    const n = callsOf(walkPath[walkPath.length - 1]).length;
-    const keys = {
-      ArrowDown: () => n && markCall((walkCursor + 1) % n), j: () => n && markCall((walkCursor + 1) % n),
-      ArrowUp: () => n && markCall((walkCursor + n - 1) % n), k: () => n && markCall((walkCursor + n - 1) % n),
-      ArrowRight: () => stepInto(walkCursor), Enter: () => stepInto(walkCursor), l: () => stepInto(walkCursor),
-      ArrowLeft: stepOut, Backspace: stepOut, h: stepOut,
-    };
-    if (keys[evt.key]) { evt.preventDefault(); keys[evt.key](); return; }
+  if (pathView) {
+    const { i, at } = pathView, last = codePaths[i].ids.length - 1;
+    const go = d => { evt.preventDefault(); showPath(i, at === null ? (d > 0 ? 0 : null) : at + d < 0 ? null : Math.min(at + d, last)); };
+    if (evt.key === "ArrowRight" || evt.key === "j") return go(1);
+    if (evt.key === "ArrowLeft" || evt.key === "k") return go(-1);
   }
-  if (evt.key === "ArrowRight" && NOTES.tour.length) showStep(tourStep + 1);
-  if (evt.key === "ArrowLeft" && tourStep > 0) showStep(tourStep - 1);
   if (evt.key === "Escape") { if (commentMode) setCommentMode(false); else home(); }
   if ((evt.key === "c" || evt.key === "C") && comments.on) setCommentMode(!commentMode);
   if (evt.key === "/" && comments.on) { evt.preventDefault(); setChat(true); chat.box.focus(); }
