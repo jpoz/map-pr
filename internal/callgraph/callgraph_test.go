@@ -322,3 +322,65 @@ func TestBuildLocals(t *testing.T) {
 		t.Errorf("locals = %v, want %v", got, want)
 	}
 }
+
+const ifaceSource = `package a
+
+type Continuer interface{ Continue() int }
+
+type Server struct{}
+
+func (s *Server) Continue() int { return 1 }
+
+type runtime struct{ c Continuer }
+
+func (r runtime) message() int { return r.c.Continue() }
+`
+
+// A call through an interface declared in the repository reaches the
+// repository's implementation of it, as a use on the call's line.
+func TestBuildInterfaceCalls(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.com/a\n\ngo 1.22\n")
+	write("a.go", ifaceSource)
+	// A test fake implements the interface too, and must not be a target.
+	write("a_test.go", "package a\n\ntype fake struct{}\n\nfunc (fake) Continue() int { return 2 }\n")
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The PR changes the body of (*Server).Continue (line 7).
+	d := &gitdiff.Diff{Root: root, Files: map[string]*gitdiff.FileChange{
+		"a.go": {Path: "a.go", Lines: map[int]bool{7: true}},
+	}}
+	m, err := Build(d, Options{Depth: 1, Tests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{}
+	for _, n := range m.Nodes {
+		names[n.ID] = n.Name
+	}
+	var edges []string
+	for _, e := range m.Edges {
+		edges = append(edges, names[e.From]+"->"+names[e.To])
+	}
+	if !slices.Contains(edges, "(runtime).message->(*Server).Continue") {
+		t.Errorf("edges = %q, want (runtime).message -> (*Server).Continue", edges)
+	}
+	for _, e := range m.Edges {
+		if names[e.From] == "(runtime).message" && !slices.Contains(e.Lines, 11) {
+			t.Errorf("edge from (runtime).message has lines %v, want the call's line 11", e.Lines)
+		}
+	}
+	for _, n := range m.Nodes {
+		if n.Name == "(fake).Continue" {
+			t.Errorf("the test fake (fake).Continue is on the map; a test implementation must not be a target")
+		}
+	}
+}
