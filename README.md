@@ -1,6 +1,6 @@
 # map-pr
 
-<img width="800" height="488" alt="CleanShot 2026-10-28 at 8 28 18 AM" src="https://github.com/user-attachments/assets/4e71583e-93c9-4ecf-bd12-853419478c1d" />
+<img width="800" height="446" alt="The map of ollama #19095" src="docs/demo.gif" />
 
 Draws a Go or TypeScript pull request as a map you zoom through: the
 declarations the branch changes (functions, methods, types, constants,
@@ -8,9 +8,10 @@ variables), the code that uses them, and the entry points that reach them. With 
 Claude adds a summary, themes and notes, and answers questions you drop on
 the map.
 
-**Example:** [the map of map-pr #5](https://www.jpoz.net/map-pr/example/),
-made by `/map-pr` for the pull request that added TypeScript. It maps both
-the Go and the JavaScript in it.
+**Example:** [the map of ollama #19095](https://www.jpoz.net/map-pr/example/),
+made by `/map-pr` for the pull request that adds `template_source` to
+`ollama show`. It follows the change from the API type through the server to
+the CLI.
 
 ## Install
 
