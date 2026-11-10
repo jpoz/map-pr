@@ -1,6 +1,7 @@
 package callgraph
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -155,17 +156,20 @@ func TestBuildEntryPoints(t *testing.T) {
 	if h == nil || h.Status != StatusEntry || h.Entry.Kind != EntryHTTP || !slices.Equal(h.Entry.Routes, []string{"GET /x"}) {
 		t.Fatalf("handleX = %+v, want an HTTP entry with route GET /x", h)
 	}
-	if byName["far"] != nil {
-		t.Errorf("far is on the map; it should only be named on the entry edge")
+	// far, the code in between, is on the map, and the path from handleX is
+	// one call after another, each with its line.
+	if f := byName["far"]; f == nil || f.Status != StatusVia {
+		t.Fatalf("far = %+v, want it on the map as via", f)
 	}
 	var got []string
 	for _, e := range m.Edges {
-		if names[e.From] == "handleX" {
-			got = append(got, names[e.To]+" via "+strings.Join(e.Via, ","))
+		if from := names[e.From]; from == "handleX" || from == "far" {
+			got = append(got, fmt.Sprintf("%s→%s %v via=%v", from, names[e.To], e.Lines, e.Via))
 		}
 	}
-	if want := []string{"helper via far"}; !slices.Equal(got, want) {
-		t.Errorf("handleX edges = %v, want %v", got, want)
+	slices.Sort(got)
+	if want := []string{"far→helper [9] via=[]", "handleX→far [11] via=[]"}; !slices.Equal(got, want) {
+		t.Errorf("edges = %v, want %v", got, want)
 	}
 }
 

@@ -76,6 +76,19 @@ function ZoomMap(canvas, opts) {
   // Code paths: {id, color, label, ids, cards}, drawn as colored lines.
   // activeFlow is the path that is open; hoverFlow the one under the pointer.
   let flows = [], activeFlow = null, hoverFlow = null;
+  // intro draws the code paths one at a time when the page opens: path i
+  // grows from its start one station per INTRO_STEP ms from t0, and each
+  // station it reaches sends out a pulse. n is how many stations path i
+  // has this frame, reached the last one that pulsed. at holds when each
+  // card on a path was reached, and ends when each path that played got to
+  // its end, for the branches; grown the branches that have pulsed.
+  let intro = null, pulses = [];
+  // branches tie the code no path runs through to the paths, as thin lines
+  // in the color of the path each joins; branchEdges are the edges they
+  // draw, which the plain edges leave out. branchDepth is how many branches
+  // deep each path's longest one goes.
+  let branches = [], branchEdges = new Set(), branchDepth = [];
+  const INTRO_STEP = 450, INTRO_GAP = 500, PULSE_MS = 900, BRANCH_MS = 380;
   // Comment pins: {id, node, line, pkg, x, y, state, count}. In comment mode
   // a click drops a new comment where it lands.
   let notePins = [], activePin = null, commentMode = false;
@@ -98,8 +111,9 @@ function ZoomMap(canvas, opts) {
       entry: v("--entry"), entryBg: v("--entry-bg"),
     };
   }
-  const statusColor = s => s === "added" ? C.added : s === "modified" ? C.modified : s === "entry" ? C.entry : C.caller;
-  const statusBg = s => s === "added" ? C.addedBg : s === "modified" ? C.modifiedBg : s === "entry" ? C.entryBg : C.callerBg;
+  // Code a path only passes through is muted: it is there to show the way.
+  const statusColor = s => s === "added" ? C.added : s === "modified" ? C.modified : s === "entry" ? C.entry : s === "via" ? C.muted : C.caller;
+  const statusBg = s => s === "added" ? C.addedBg : s === "modified" ? C.modifiedBg : s === "entry" ? C.entryBg : s === "via" ? C.pkgBg : C.callerBg;
   const isChanged = n => n.status === "added" || n.status === "modified";
   // entryTag is the short label of how execution enters at a declaration.
   const entryTag = e => ({ http: "▶ HTTP", goroutine: "▶ GO", main: "▶ MAIN", module: "▶ TOP LEVEL", root: "NO CALLERS" })[e.kind] || "▶ ENTRY";
@@ -309,7 +323,8 @@ function ZoomMap(canvas, opts) {
     const groups = [
       ["Entry points", p.cards.filter(c => c.node.status === "entry")],
       ["Changed", p.cards.filter(c => isChanged(c.node))],
-      ["Uses a change", p.cards.filter(c => c.node.status === "caller")],
+      ["Calls changed code", p.cards.filter(c => c.node.status === "caller")],
+      ["On a code path", p.cards.filter(c => c.node.status === "via")],
     ].filter(g => g[1].length);
     // Every card in a package has the same width, so the columns line up.
     const wants = p.cards.map(c => wantWidth(c.node)).sort((a, b) => a - b);
@@ -510,7 +525,7 @@ function ZoomMap(canvas, opts) {
     cam.y = wy - (sy - H / 2) / cam.z;
   }
 
-  function stopMotion() { fly = null; wheel = null; inertia = null; }
+  function stopMotion() { fly = null; wheel = null; inertia = null; skipIntro(); }
 
   // flyTo moves the camera along a zoom-out, pan, zoom-in path (van Wijk and
   // Nuij, "Smooth and efficient zooming and panning"), so a long move first
@@ -709,6 +724,16 @@ function ZoomMap(canvas, opts) {
       }
       if (t >= 1) { tween = null; leaving = []; } else active = true;
     }
+    if (intro) {
+      // A path is done once its line and its branches have grown.
+      if (intro.n && now - intro.t0 > (intro.n - 1) * INTRO_STEP + (branchDepth[intro.i] || 0) * BRANCH_MS + INTRO_GAP) {
+        intro.ends.set(intro.i, intro.t0 + (intro.n - 1) * INTRO_STEP);
+        intro = intro.i + 1 < flows.length ? { ...intro, i: intro.i + 1, t0: now, n: 0, reached: -1 } : null;
+      }
+      active = true;
+    }
+    pulses = pulses.filter(p => now - p.t < PULSE_MS);
+    if (pulses.length) active = true;
     for (const k of [...cards.values(), ...pkgs.values()]) {
       const d = (k.dimTo ?? 1) - k.dim;
       if (Math.abs(d) > 0.005) { k.dim += d * 0.2; active = true; } else k.dim = k.dimTo ?? 1;
@@ -765,6 +790,7 @@ function ZoomMap(canvas, opts) {
     for (const p of pkgs.values()) if (overlaps(p, view)) drawSummary(p, p.t);
     drawPackageEdges((A, B) => 1 - Math.max(A.t, B.t));
     drawFlows(open, false);
+    drawPulses();
     drawLabels(view);
     drawFlowBadges();
     drawMarks(view);
@@ -887,7 +913,7 @@ function ZoomMap(canvas, opts) {
     return [Math.max(nw, sw), size * 2.3];
   }
 
-  const toneOf = p => p.changed ? (p.cards.every(c => c.node.status !== "modified") ? "added" : "modified") : p.cards.every(c => c.node.status === "entry") ? "entry" : "caller";
+  const toneOf = p => p.changed ? (p.cards.every(c => c.node.status !== "modified") ? "added" : "modified") : p.cards.every(c => c.node.status === "entry") ? "entry" : p.cards.every(c => c.node.status === "via") ? "via" : "caller";
 
   // drawSummary covers a package with a solid card and a large label when
   // zoomed out. It fades away as the declarations inside become visible.
@@ -1045,7 +1071,83 @@ function ZoomMap(canvas, opts) {
   // under its name plate; as the package opens, the station splits into the
   // declarations inside.
   function setFlows(list) {
+    skipIntro();
     flows = list.map(f => ({ ...f, cards: f.ids.map(id => cards.get(id)).filter(Boolean) })).filter(f => f.cards.length > 1);
+    setBranches();
+  }
+
+  // setBranches joins each card off the paths to the nearest card on one,
+  // through the fewest edges on the map in either direction. Ties go to the
+  // first path. A card that no edge links to a path gets no branch.
+  // Each branch also keeps its root, the card on the path it grows from,
+  // and its depth, how many branches lie between it and that root.
+  function setBranches() {
+    branches = [];
+    branchEdges = new Set();
+    branchDepth = flows.map(() => 0);
+    const join = new Map(), queue = [], near = new Map(), root = new Map(), depth = new Map();
+    flows.forEach((f, i) => { for (const c of f.cards) if (!join.has(c)) { join.set(c, i); queue.push(c); root.set(c, c); depth.set(c, 0); } });
+    for (const e of edges) for (const [x, y] of [[e.a, e.b], [e.b, e.a]]) {
+      if (!near.has(x)) near.set(x, []);
+      near.get(x).push([y, e]);
+    }
+    for (let i = 0; i < queue.length; i++) {
+      const c = queue[i];
+      for (const [d, e] of near.get(c) || []) {
+        if (join.has(d)) continue;
+        const fi = join.get(c);
+        join.set(d, fi);
+        root.set(d, root.get(c));
+        depth.set(d, depth.get(c) + 1);
+        queue.push(d);
+        branches.push({ leaf: d, stem: c, e, fi, root: root.get(c), depth: depth.get(d) });
+        branchEdges.add(e);
+        branchDepth[fi] = Math.max(branchDepth[fi], depth.get(d));
+      }
+    }
+  }
+
+  // drawBranches draws the branches under the path lines, in the layer
+  // drawFlows is drawing: a thin line on a casing, fainter the deeper it is,
+  // with a small station at the leaf when its package is closed.
+  function drawBranches(open, under, k) {
+    const w = lerp(1.2, 1.8, open), casing = 1, leaves = [], now = performance.now();
+    for (const b of branches) {
+      const grow = branchGrowth(b, now);
+      if (grow <= 0) continue;
+      const f = flows[b.fi];
+      // Each branch further from the path is fainter.
+      let a = Math.max(0.12, 0.55 * Math.pow(0.6, b.depth - 1));
+      if (activeFlow !== null && f.id !== activeFlow) a = 0.1;
+      else if (activeFlow === null && selected && selected !== b.leaf.id && selected !== b.stem.id) a = 0.15;
+      if (focus && focus.ids && activeFlow === null) a *= 0.3;
+      const A = stationOf(b.stem), B = stationOf(b.leaf);
+      if (A.key === B.key || a * k < 0.02) continue;
+      if (grow >= 1 && intro && !intro.grown.has(b)) {
+        intro.grown.add(b);
+        pulses.push({ s: B, color: f.color, t: now, soft: true });
+      }
+      let pts = route(A, B);
+      if (grow < 1) pts = cutLine(pts, lengthTo(pts, pts.length - 1) * ease(grow));
+      ctx.globalAlpha = a * k;
+      ctx.strokeStyle = C.bg;
+      ctx.lineWidth = w + casing * 2;
+      strokeRounded(pts, 10);
+      ctx.strokeStyle = f.color;
+      ctx.lineWidth = w;
+      strokeRounded(pts, 10);
+      if (!under && !B.hub && grow >= 1) leaves.push([B, f.color, a * k]);
+    }
+    for (const [B, color, a] of leaves) {
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(B.x, B.y, w + 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = C.panel;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    }
   }
 
   // stationOf is where a path stops at card c, in screen pixels: the card's
@@ -1123,6 +1225,10 @@ function ZoomMap(canvas, opts) {
       if (focus && focus.ids && !on && activeFlow === null) a *= 0.3;
       if (hot) a = Math.max(a, 0.95);
       const st = runs[i];
+      if (intro && (i > intro.i || (i === intro.i && performance.now() < intro.t0))) return;
+      // A path with one station here has nothing to grow; the intro waits
+      // one gap on it and goes on.
+      if (intro && i === intro.i) intro.n = Math.max(st.length, 1);
       if (a < 0.02 || st.length < 2) return;
       const pts = [];
       for (let j = 1; j < st.length; j++) {
@@ -1133,16 +1239,46 @@ function ZoomMap(canvas, opts) {
         const fwd = A.key < B.key;
         const seg = offsetLine(fwd ? route(A, B) : route(B, A), slot);
         pts.push(...(fwd ? seg : seg.reverse()));
-        if (j === 1) A.at = pts[0];
+        if (j === 1) { A.at = pts[0]; A.idx = 0; }
         B.at = pts[pts.length - 1];
+        B.idx = pts.length - 1;
       }
-      out.push({ f, a, w: px + (on || hot ? 1.5 : 0), casing, pts, st, gap, bundles: bundles });
+      // While the intro plays, the path it is on ends where it has got to,
+      // and reach is the last station it has passed.
+      let line = pts, reach = Infinity;
+      if (intro && i === intro.i) {
+        const u = Math.min((performance.now() - intro.t0) / INTRO_STEP, st.length - 1), j = Math.floor(u);
+        reach = j;
+        if (u < st.length - 1) line = cutLine(pts, lerp(lengthTo(pts, st[j].idx), lengthTo(pts, st[j + 1].idx), ease(u - j)));
+      }
+      out.push({ f, i, a, w: px + (on || hot ? 1.5 : 0), casing, pts: line, st, gap, bundles: bundles, reach, cut: line !== pts });
     });
     // The open path and the hovered one draw last, on top.
     return out.sort((x, y) => (x.f.id === activeFlow || x.f.id === hoverFlow) - (y.f.id === activeFlow || y.f.id === hoverFlow));
   }
 
   const dist = (p, q) => Math.hypot(q[0] - p[0], q[1] - p[1]);
+  // lengthTo is how long a polyline is up to its point i.
+  function lengthTo(pts, i) {
+    let l = 0;
+    for (let k = 1; k <= i; k++) l += dist(pts[k - 1], pts[k]);
+    return l;
+  }
+  // cutLine is the first len pixels of a polyline.
+  function cutLine(pts, len) {
+    const out = [pts[0]];
+    for (let k = 1; k < pts.length; k++) {
+      const d = dist(pts[k - 1], pts[k]);
+      if (len <= d) {
+        const t = d ? len / d : 0;
+        out.push([lerp(pts[k - 1][0], pts[k][0], t), lerp(pts[k - 1][1], pts[k][1], t)]);
+        return out;
+      }
+      len -= d;
+      out.push(pts[k]);
+    }
+    return out;
+  }
   // strokeRounded strokes a polyline with each corner rounded.
   function strokeRounded(pts, r) {
     const q = [pts[0]];
@@ -1167,7 +1303,18 @@ function ZoomMap(canvas, opts) {
     if (!flows.length) return;
     const k = under ? open : 1 - open;
     const lines = flowLines(open);
-    if (!under) flowFrame = lines;
+    if (!under) {
+      flowFrame = lines;
+      // Each station the intro reaches pulses, at every zoom.
+      for (const l of lines) if (intro && l.i === intro.i && l.reach > intro.reached) {
+        const now = performance.now();
+        for (let j = intro.reached + 1; j <= l.reach; j++) {
+          pulses.push({ s: l.st[j], color: l.f.color, t: now });
+          intro.at.set(l.st[j].card, now);
+        }
+        intro.reached = l.reach;
+      }
+    }
     if (k < 0.01) return;
     setScreen();
     ctx.save();
@@ -1185,7 +1332,9 @@ function ZoomMap(canvas, opts) {
     }
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    for (const { f, a, w, casing, pts } of lines) {
+    drawBranches(open, under, k);
+    for (const { f, a, w, casing, pts, cut } of lines) {
+      if (pts.length < 2) continue;
       ctx.globalAlpha = a * k;
       ctx.strokeStyle = C.bg;
       ctx.lineWidth = w + casing * 2;
@@ -1193,6 +1342,7 @@ function ZoomMap(canvas, opts) {
       ctx.strokeStyle = f.color;
       ctx.lineWidth = w;
       strokeRounded(pts, 16);
+      if (cut) continue;
       // The end: a bar across the line.
       const e = pts[pts.length - 1], d = pts[pts.length - 2], l = dist(d, e) || 1;
       const nx = -(e[1] - d[1]) / l, ny = (e[0] - d[0]) / l, h = w * 1.4;
@@ -1208,7 +1358,7 @@ function ZoomMap(canvas, opts) {
     if (under) { ctx.globalAlpha = 1; setWorld(); return; }
     // Stations: each place once, drawn as strongly as its strongest line.
     const places = new Map();
-    for (const { f, a, w, st, gap } of lines) for (const s of st) {
+    for (const { f, a, w, st, gap, reach } of lines) for (const s of st.slice(0, reach + 1)) {
       const p = places.get(s.key) || { s, a: 0, w, gap, colors: new Set(), at: s.at };
       p.a = Math.max(p.a, a * k);
       p.colors.add(f.color);
@@ -1231,6 +1381,65 @@ function ZoomMap(canvas, opts) {
     ctx.globalAlpha = 1;
     setWorld();
   }
+  // branchGrowth is how far a branch has grown in the intro, from 0 to 1. It
+  // starts when its path reaches its root, or when its path ends if the
+  // root was not a station of its own (inside a closed package), and grows
+  // after the branches between it and the root.
+  function branchGrowth(b, now) {
+    if (!intro) return 1;
+    if (b.fi > intro.i) return 0;
+    let t = intro.at.get(b.root);
+    if (t === undefined) t = intro.ends.get(b.fi);
+    if (t === undefined) return 0;
+    return clamp((now - t - (b.depth - 1) * BRANCH_MS) / BRANCH_MS, 0, 1);
+  }
+
+  // drawPulses marks each station the intro reaches in the path's color: an
+  // open card glows and fades, and a closed one sends out a growing ring.
+  function drawPulses() {
+    if (!pulses.length) return;
+    setScreen();
+    const now = performance.now();
+    for (const { s, color, t, soft } of pulses) {
+      const k = clamp((now - t) / PULSE_MS, 0, 1), fade = (1 - k) * (soft ? 0.6 : 1);
+      const c = s.card;
+      ctx.strokeStyle = ctx.fillStyle = color;
+      if (!s.hub && openOf(c) > 0.5) {
+        const g = 6 * ease(k);
+        ctx.beginPath();
+        ctx.roundRect(sx(c.x) - g, sy(c.y) - g, c.w * cam.z + g * 2, c.h * cam.z + g * 2, 8);
+        ctx.globalAlpha = fade * c.fade * 0.18;
+        ctx.fill();
+        ctx.globalAlpha = fade * c.fade;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        continue;
+      }
+      ctx.globalAlpha = fade;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, lerp(6, 30, ease(k)), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    setWorld();
+  }
+
+  // playPaths starts the intro, unless the reader asked for less motion.
+  function playPaths() {
+    if (!flows.length || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    intro = { i: 0, t0: performance.now() + 400, n: 0, reached: -1, at: new Map(), ends: new Map(), grown: new Set() };
+    request();
+  }
+  // skipIntro ends the intro with every path drawn whole. Anything that
+  // moves the map ends it, as the pulses are where the stations were.
+  function skipIntro() {
+    if (!intro && !pulses.length) return;
+    intro = null;
+    pulses = [];
+    request();
+  }
+
   // flowFrame holds the paths as drawn this frame, for their badges;
   // flowBadges holds where each badge was drawn, for the pointer.
   let flowFrame = [], flowBadges = [];
@@ -1382,6 +1591,7 @@ function ZoomMap(canvas, opts) {
       const isHot = hot && (e.from === hot || e.to === hot) || portSet && portSet.has(e);
       const isFocus = focusSet && focusSet.has(e.from) && focusSet.has(e.to);
       if (isHot || isFocus) { later.push([e, isHot, t1]); continue; }
+      if (branchEdges.has(e)) continue;
       // Edges to other packages show as package edges until zoomed in; at
       // the declaration level they show for the hovered or selected card.
       const same = e.a.node.package === e.b.node.package;
@@ -1562,14 +1772,14 @@ function ZoomMap(canvas, opts) {
     }
     if (n.exported) {
       ctx.font = `600 9.5px ${SANS}`;
-      const tw = ctx.measureText("EXPORTED").width + 10;
+      const tw = ctx.measureText("PUBLIC").width + 10;
       ctx.strokeStyle = C.line;
       ctx.lineWidth = 1 / z;
       roundRect(rx - tw, 8, tw, 14, 7);
       ctx.stroke();
       ctx.fillStyle = C.muted;
       ctx.textAlign = "center";
-      ctx.fillText("EXPORTED", rx - tw / 2, 18.5);
+      ctx.fillText("PUBLIC", rx - tw / 2, 18.5);
       ctx.textAlign = "right";
       rx -= tw + 8;
     }
@@ -2261,6 +2471,7 @@ function ZoomMap(canvas, opts) {
 
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
+    skipIntro();
     // A sideways swipe, or shift and the wheel, over code wider than its
     // card scrolls that card's code instead of zooming the map.
     if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
@@ -2362,7 +2573,7 @@ function ZoomMap(canvas, opts) {
     return to && to.length ? callText(to) : null;
   }
   function callText(to) {
-    const label = n => ({ caller: "uses a change", entry: "entry point" })[n.status] || n.status;
+    const label = n => ({ caller: "calls changed code", entry: "entry point", via: "on a path" })[n.status] || n.status;
     return "Calls " + to.map(n => `${n.name} (${label(n)})`).join(", ");
   }
 
@@ -2374,7 +2585,8 @@ function ZoomMap(canvas, opts) {
     setActivePin(id) { activePin = id; request(); },
     setCommentMode(on) { commentMode = on; canvas.style.cursor = on ? "crosshair" : "grab"; },
     setCanAsk(on) { canAsk = on; },
-    setFlow(id) { activeFlow = id; request(); },
+    setFlow(id) { if (id !== null) skipIntro(); activeFlow = id; request(); },
+    playPaths, skipIntro,
     get camera() { return { ...cam }; },
     get level() { return lastLevel; },
     get drawMs() { return drawMs; },

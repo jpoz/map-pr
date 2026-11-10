@@ -44,6 +44,7 @@
   .legend .l-modified::before { background: var(--modified); }
   .legend .l-caller::before { background: var(--caller); }
   .legend .l-entry::before { background: var(--entry); }
+  .legend .l-via::before { background: var(--muted); }
   .legend .l-call { cursor: help; }
   .legend .l-call::before { background: var(--hl); border: 1px solid var(--line); }
   .legend .toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--ink); }
@@ -99,6 +100,7 @@
   .badge.caller { color: var(--caller); background: var(--caller-bg); }
   .badge.exported { color: var(--muted); border: 1px solid var(--line); }
   .badge.entry { color: var(--entry); background: var(--entry-bg); }
+  .badge.via { color: var(--muted); background: var(--pkg-bg); }
   .top { color: var(--modified); }
   .entry-pill { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .03em; padding: 1px 6px;
     border-radius: 8px; color: var(--panel); background: var(--entry); vertical-align: 1px; text-transform: uppercase; }
@@ -273,7 +275,7 @@
   <h1 id="title">PR Map</h1>
   <div class="meta" id="meta"></div>
   <div class="legend">
-    <span class="l-added">added</span><span class="l-modified">modified</span><span class="l-caller">uses a change</span><span class="l-entry">entry point</span><span class="l-call" title="A line, not changed itself, that calls code this PR changes.">calls a change</span><span class="l-top" title="A changed function that no other changed function calls, directly or through other code. Start reviewing here. A package shows how many it holds.">start here</span>
+    <span class="l-added">added</span><span class="l-modified">modified</span><span class="l-caller" title="Code this PR does not change that calls code it changes.">calls changed code</span><span class="l-entry" title="Where execution starts: main, an HTTP handler, a goroutine, or code with no callers.">entry point</span><span class="l-via" title="Code the PR does not change that a code path passes through on its way from an entry point to the changes.">on a path</span><span class="l-call" title="A line, not changed itself, that calls code this PR changes.">line calls changed code</span><span class="l-top" title="A changed function that no other changed function calls, directly or through other code. Start reviewing here. A package shows how many it holds.">review first</span>
     <label class="toggle"><input type="checkbox" id="show-tests"> show tests</label>
   </div>
 </header>
@@ -293,13 +295,13 @@
     <canvas id="map"></canvas>
     <div class="hud">
       <div class="group levels">
-        <button data-level="packages">Packages</button><button data-level="decls">Declarations</button><button data-level="code">Code</button>
+        <button data-level="packages">Packages</button><button data-level="decls">Functions &amp; types</button><button data-level="code">Code</button>
       </div>
       <div class="group zoom">
         <button data-zoom="out" title="Zoom out (−)">−</button><button data-zoom="fit" title="Fit (0)">Fit</button><button data-zoom="in" title="Zoom in (+)">+</button>
       </div>
       <div class="group">
-        <button id="chat-btn" title="Chat with Claude (/)" hidden>Chat<span class="badge" hidden></span></button><button id="comment-btn" title="Attach any place on the map to a chat message (C)" hidden>Point</button>
+        <button id="chat-btn" title="Chat with Claude (/)" hidden>Chat<span class="badge" hidden></span></button><button id="comment-btn" title="Attach any place on the map to a chat message (C)" hidden>Pin to map</button>
       </div>
     </div>
     <div id="tip" hidden></div>

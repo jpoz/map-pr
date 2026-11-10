@@ -103,7 +103,7 @@ The map is one space you zoom through, with three levels of detail:
 | Zoom | You see |
 |---|---|
 | out | **Packages**: one card per package with its changed files and `+/−` lines, and arrows between packages that use each other |
-| middle | **Declarations**: a card per declaration with its kind, name, file and a minimap of its code; changed lines are green, lines that use something on the map are yellow |
+| middle | **Functions & types**: a card per declaration with its kind, name, file and a minimap of its code; changed lines are green, lines that use something on the map are yellow |
 | in | **Code**: the syntax-colored source in each card; an edge starts at the line that makes the call |
 
 Nothing moves when the level changes; each level fades into the next. A
@@ -114,14 +114,14 @@ its code. A declaration clicked in the side panel also zooms to its code. The bu
 zoom in, out and fit. A card names what it is when hovered and its label is too
 small to read.
 
-Code the PR does not change is not on the map, but you can still read it. A
+Other code the PR does not change is not on the map, but you can still read it. A
 declaration's panel lists the unchanged code it uses under "Also uses (not
 changed)", and each name in its source that refers to other code is a link.
 Click a name to see its definition in the panel (the first 80 lines), with the
 code on the map that uses it; follow names from there. Back returns.
 
 Tests start hidden (each card shows how many tests use it; turn on "show tests"
-to see them). An EXPORTED badge marks code outside the repository can use, and
+to see them). A PUBLIC badge marks code outside the repository can use, and
 the map cannot see those users. A changed type, constant or variable shows at
 most 10 users; the panel says how many more there are.
 
@@ -133,8 +133,9 @@ the code registers it next to a route string such as
 top-level code of a TypeScript module, or code with no callers outside tests (usually called through an interface). map-pr walks
 up from each declaration on the map to the nearest entry points, through up to
 8 calls that are not on the map. It keeps the fewest entry points that reach
-every change, and adds those to the map with a dashed edge; the panel shows the
-calls in between. Each declaration lists the entry points it is reached from.
+every change, and adds those to the map with the code in between, so each call
+on the way is an edge with its line. That code is gray and marked "on a path".
+Each declaration lists the entry points it is reached from.
 
 ## Code paths
 
@@ -145,6 +146,18 @@ numbered, colored line through its declarations, like a transit line. When
 paths share a call, their lines run side by side; a declaration on more than
 one path is an interchange, drawn as a white ring. Zoomed out, the lines cross
 the packages, so you see where the paths go and where they meet.
+
+Code that no path runs through hangs off the paths as a thin branch: each
+declaration off the paths joins the nearest one on a path, through the
+fewest calls on the map in either direction, and its branch takes that
+path's color. A branch further from the path is fainter. Code that no call on
+the map links to a path has no branch.
+
+When the page opens on the overview, the paths draw themselves one at a time:
+each line grows from its entry point, and each declaration it reaches pulses
+in the line's color. Its branches grow out of each declaration as the line
+reaches it, one level after another, before the next path starts. A click, a scroll or any move of the map ends this and
+shows every path. With reduced motion set in the system, the paths show at once.
 
 Point at a line to name it, and click it (or pick it under "Code paths" in the
 overview) to follow it. The panel lists every step in call order, with the line
@@ -187,7 +200,7 @@ Served this way, the page has a **chat with Claude** down its left side (the
 Chat button, or `/` to type in it). A message can carry a place on the map:
 click a line number in a card's code or in the side panel, or "Ask about this"
 on a declaration, and that line or declaration goes on the message you are
-writing. **Point** (or `C`) attaches any place: a line, a card, a package, or a
+writing. **Pin to map** (or `C`) attaches any place: a line, a card, a package, or a
 point on the map. Enter sends, Shift+Enter starts a new line. Drag the edge of
 the chat, or of the side panel, to resize it; the page keeps the width.
 

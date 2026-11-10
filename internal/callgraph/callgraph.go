@@ -33,6 +33,10 @@ const (
 	// StatusEntry marks an entry point that reaches the changes only through
 	// code that is not on the map.
 	StatusEntry Status = "entry"
+	// StatusVia marks code that a code path passes through on its way from
+	// an entry point to the changes. The PR does not change it, and it calls
+	// no change itself.
+	StatusVia Status = "via"
 )
 
 // EntryKind tells how execution enters at a declaration.
@@ -118,8 +122,12 @@ type Edge struct {
 	Lines []int  `json:"lines"`
 	// Via, on an edge from an entry point, names the declarations not on the
 	// map that the call passes through, from the entry point down. It is
-	// empty, not nil, for a direct call, and nil on every other edge.
+	// empty, not nil, for a direct call, and nil on every other edge. Build
+	// puts that code on the map, so its edges have no Via; the page still
+	// reads it in maps saved before.
 	Via []string `json:"via"`
+	// viaIDs are the IDs of the declarations that Via names, in its order.
+	viaIDs []string
 }
 
 // Map is the full PR map.
@@ -617,9 +625,26 @@ func build(d *gitdiff.Diff, s *scan, opts Options) *Map {
 			n.Status = StatusEntry
 			n.Entry = entry(e.From)
 		}
-		key := [2]string{e.From, e.To}
-		if edges[key] == nil {
-			edges[key] = e
+		// The code in between goes on the map too, so a code path shows
+		// every call on its way; each call is an edge with its lines.
+		chain := append(append([]string{e.From}, e.viaIDs...), e.To)
+		for i := 1; i < len(chain); i++ {
+			from, to := chain[i-1], chain[i]
+			if !onMap[to] {
+				onMap[to] = true
+				funcs[to].node.Status = StatusVia
+			}
+			key := [2]string{from, to}
+			if edges[key] != nil {
+				continue
+			}
+			ce := &Edge{From: from, To: to}
+			for r := range refs[to] {
+				if r.from == from {
+					ce.Lines = append(ce.Lines, r.line)
+				}
+			}
+			edges[key] = ce
 		}
 	}
 
@@ -885,11 +910,12 @@ func reachFromEntries(onMap map[string]bool, decls map[string]*declInfo, refs ma
 					}
 					parent[from] = id
 					if entryOf(from) != nil {
-						via := []string{}
+						via, ids := []string{}, []string{}
 						for p := id; p != start; p = parent[p] {
 							via = append(via, decls[p].node.Name)
+							ids = append(ids, p)
 						}
-						out = append(out, &Edge{From: from, To: start, Via: via})
+						out = append(out, &Edge{From: from, To: start, Via: via, viaIDs: ids})
 						continue
 					}
 					next = append(next, from)

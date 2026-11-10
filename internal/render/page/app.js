@@ -41,7 +41,7 @@ const kindOf = n => n.kind || "func";
 const code = nodes.filter(n => !n.isTest);
 const tests = nodes.filter(n => n.isTest);
 const noteOf = n => NOTES.nodes[n.key];
-const statusLabel = n => ({ caller: "uses a change", entry: "entry point" })[n.status] || n.status;
+const statusLabel = n => ({ caller: "calls changed code", entry: "entry point", via: "on a path" })[n.status] || n.status;
 
 // callTips gives each line that calls a change a hover text that names what
 // it calls, so a call line does not read as a changed line.
@@ -143,7 +143,7 @@ if (NOTES.title) {
 }
 document.getElementById("meta").innerHTML =
   `<code>${esc(shortRef(DATA.base))}</code> (${esc(DATA.mergeBase.slice(0, 7))}) → <code>${esc(DATA.head)}</code> + work tree · ` +
-  `${code.filter(isChange).length} changed · ${code.filter(n => n.status === "caller").length} users · ${entries.length} entry points · ${tests.length} tests`;
+  `${code.filter(isChange).length} changed · ${code.filter(n => n.status === "caller").length} callers · ${entries.length} entry points · ${tests.length} tests`;
 
 // Tests often outnumber the code they cover, so they start hidden and each
 // card counts the tests that use it instead.
@@ -502,7 +502,7 @@ function showNode(id) {
   if (n.hidden > 0) usedByNote = `<p class="empty">${n.hidden} more not on the map.</p>`;
   else if (!n.expanded && n.callers > 0) usedByNote = `<p class="empty">${n.callers} more not shown (raise -depth).</p>`;
   const exported = n.exported
-    ? `<span class="badge exported">exported</span><p class="empty">Code outside this repository can use it. The map shows only users in this repository.</p>`
+    ? `<span class="badge exported">public</span><p class="empty">Code outside this repository can use it. The map shows only users in this repository.</p>`
     : "";
   const themes = themesOf(n).map(t =>
     `<li data-theme="${esc(t.id)}"><span class="chip" style="background:${t.color}"></span><span class="title">${esc(t.title)}</span></li>`).join("");
@@ -626,16 +626,16 @@ const pathChip = p => `<span class="path-chip" style="background:${p.color}">${p
 // pathView is the open path and its current station, or null.
 let pathView = null;
 
-// callFrom says how station a calls station b: the lines of the call, or the
-// code off the map in between.
+// callFrom says how station a calls station b: at the lines of the call, or
+// through the code off the map in between.
 function callFrom(a, b) {
   const es = edges.filter(e => e.from === a && e.to === b);
   const via = es.find(e => e.via);
-  if (via) return `through ${via.via.length ? via.via.map(esc).join(" → ") : "a direct call"}`;
+  if (via) return via.via.length ? `through ${via.via.map(esc).join(" → ")}` : "directly";
   const n = byId[a], lines = [...new Set(es.flatMap(e => e.lines || []))].sort((x, y) => x - y);
   if (!lines.length) return "";
   const src = (n.source || "").split("\n")[lines[0] - n.line];
-  return `line ${lines.join(", ")}` + (src ? `: <code>${esc(src.trim())}</code>` : "");
+  return `at line ${lines.join(", ")}` + (src ? `: <code>${esc(src.trim())}</code>` : "");
 }
 
 // showPath shows one code path: the map lights its line, and the panel lists
@@ -662,7 +662,7 @@ function showPath(i, at = null) {
       `<span class="name">${badge(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
       `<div class="loc">${fileLink(n.file, n.line)}</div>` +
       (noteOf(n) ? `<div class="note small">${md(noteOf(n))}</div>` : "") +
-      (call ? `<div class="call">calls ${esc(byId[p.ids[j + 1]].name)} at ${call}</div>` : "") +
+      (call ? `<div class="call">calls ${esc(byId[p.ids[j + 1]].name)} ${call}</div>` : "") +
       (others.length ? `<div class="also">Also on ${others.map(o => `<span data-path="${o.id}" title="${esc(o.label)}">${pathChip(o)}</span>`).join(" ")}</div>` : "") +
       `</div></li>`;
   }).join("");
@@ -706,7 +706,7 @@ function showTheme(themeId) {
     <span class="back" data-home>← Overview</span>
     <h2><span class="chip" style="background:${t.color}"></span>${esc(t.title)}</h2>
     <div class="prose">${md(t.summary)}</div>
-    <h3>Declarations</h3>
+    <h3>Functions &amp; types</h3>
     ${nodeList(t.nodes || [])}
     ${fileList("Files", t.files)}`);
   record("theme=" + themeId);
@@ -734,6 +734,7 @@ function selectPackage(pkg) {
   const changed = ns.filter(isChange);
   const users = ns.filter(n => n.status === "caller");
   const starts = ns.filter(n => n.status === "entry");
+  const passing = ns.filter(n => n.status === "via");
   const dir = ns[0].file.includes("/") ? ns[0].file.slice(0, ns[0].file.lastIndexOf("/")) : ".";
   const files = Object.keys(STATS).filter(f => (f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : ".") === dir).sort();
   const added = files.reduce((n, f) => n + STATS[f].added, 0), deleted = files.reduce((n, f) => n + STATS[f].deleted, 0);
@@ -744,7 +745,8 @@ function selectPackage(pkg) {
     <p>${files.length} changed file${files.length === 1 ? "" : "s"} · <span class="add-count">+${added}</span> <span class="del-count">−${deleted}</span></p>
     ${starts.length ? `<h3>Entry points</h3>${list(starts)}` : ""}
     ${changed.length ? `<h3>Changed here</h3>${list(changed)}` : ""}
-    ${users.length ? `<h3>Uses a change</h3><p class="empty">Unchanged code in this package that uses a change.</p>${list(users)}` : ""}
+    ${users.length ? `<h3>Calls changed code</h3><p class="empty">Code in this package that the PR does not change, but that calls code it changes.</p>${list(users)}` : ""}
+    ${passing.length ? `<h3>On a code path</h3><p class="empty">Code the PR does not change that a code path passes through on its way to the changes.</p>${list(passing)}` : ""}
     ${fileList("Files", files)}`);
   record("pkg=" + pkg);
 }
@@ -786,21 +788,21 @@ window.addEventListener("popstate", route);
 
 function showSummary() {
   const changes = group => linkList(group.filter(isChange).sort((a, b) => !!b.top - !!a.top).map(n => [n.id,
-    `<span class="name">${badge(n)} ${kindTag(n)} ${n.top ? `<span class="top" title="No other change calls it: start here">★</span> ` : ""}${esc(n.name)}</span>` +
-    (n.exported ? ` <span class="badge exported">exported</span>` : "") +
+    `<span class="name">${badge(n)} ${kindTag(n)} ${n.top ? `<span class="top" title="No other change calls it: review it first">★</span> ` : ""}${esc(n.name)}</span>` +
+    (n.exported ? ` <span class="badge exported">public</span>` : "") +
     (n.isTest ? "" : ` <span class="loc">${n.callers - testUsers(n.id)} code · ${testUsers(n.id)} tests</span>`)]));
   // The top functions (★) are where to start: changed code that no other
   // change calls. The ones that reach the most changes come first.
   const tops = code.filter(n => n.top)
     .map(n => ({ n, reach: changesReached(n.id).filter(id => id !== n.id).length }))
     .sort((a, b) => b.reach - a.reach || a.n.file.localeCompare(b.n.file) || a.n.line - b.n.line);
-  const startHere = tops.length ? `<h3><span class="top">★</span> Start here</h3>
+  const startHere = tops.length ? `<h3><span class="top">★</span> Review first</h3>
     <p class="empty">Changed code that no other change calls. Click one to zoom in to its code.</p>
     ${linkList(tops.map(({ n, reach }) => [n.id, `<span class="name">${badge(n)} ${kindTag(n)} ${esc(n.name)}</span>` +
       ` <span class="loc">${esc(n.file)}:${n.line}${reach ? ` · reaches ${reach} more change${reach === 1 ? "" : "s"}` : ""}</span>`]))}` : "";
   const themes = NOTES.themes.map(t => `<li data-theme="${esc(t.id)}">
       <div><span class="chip" style="background:${t.color}"></span><span class="title">${esc(t.title)}</span>
-      <span class="loc">${(t.nodes || []).length} declarations</span></div>
+      <span class="loc">${(t.nodes || []).length === 1 ? "1 function or type" : `${(t.nodes || []).length} functions &amp; types`}</span></div>
       <div class="sum">${md(t.summary.split(/\n\s*\n/)[0])}</div></li>`).join("");
 
   setPanel(`
@@ -1167,9 +1169,11 @@ splitter(document.getElementById("chat-split"), chat.el,
 
 if (!nodes.length) {
   document.getElementById("stage").insertAdjacentHTML("beforeend",
-    `<p class="empty" style="position:absolute;inset:24px">No changed Go or TypeScript declarations found.</p>`);
+    `<p class="empty" style="position:absolute;inset:24px">This PR changes no Go or TypeScript functions or types. The side panel lists the files it changes.</p>`);
 }
 map.setData(mapData());
 map.fit(false);
 route();
+// On the overview, the code paths draw themselves one at a time.
+if (!location.hash.slice(1)) map.playPaths();
 startComments();
