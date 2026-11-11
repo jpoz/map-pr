@@ -513,7 +513,8 @@ function ZoomMap(canvas, opts) {
 
   const minZ = () => Math.min(0.05, fitZoom(bounds, 40) * 0.5);
   function fitZoom(r, pad) {
-    return clamp(Math.min((W - pad * 2) / Math.max(r.w, 1), (H - pad * 2) / Math.max(r.h, 1)), 0.01, MAX_Z);
+    // A large PR's map can need a zoom well under 0.01 to fit.
+    return clamp(Math.min((W - pad * 2) / Math.max(r.w, 1), (H - pad * 2) / Math.max(r.h, 1)), 0.001, MAX_Z);
   }
   const toWorld = (sx, sy) => [(sx - W / 2) / cam.z + cam.x, (sy - H / 2) / cam.z + cam.y];
   const viewRect = (m = 0) => ({ x: cam.x - W / 2 / cam.z - m, y: cam.y - H / 2 / cam.z - m, w: W / cam.z + 2 * m, h: H / cam.z + 2 * m });
@@ -590,8 +591,28 @@ function ZoomMap(canvas, opts) {
   const finalRect = k => (tween && tween.to.get(k)) || k;
 
   function fit(animate = true) {
-    const t = fitRect(bounds, { pad: 40 });
+    // Zoomed out, each package is a name plate of a fixed screen size, centered
+    // on the package, and it can reach past the package. Fit the plates too.
+    // Their size in the world depends on the zoom, so repeat until it settles.
+    let t = fitRect(bounds, { pad: 40 });
+    for (let i = 0; i < 4; i++) t = fitRect(withPlates(bounds, t.z), { pad: 40 });
     if (animate) flyTo(t); else { stopMotion(); Object.assign(cam, t); request(); }
+  }
+
+  // withPlates is r grown to hold each package's name plate at zoom z, sized
+  // as drawLabels sizes it.
+  function withPlates(r, z) {
+    let x1 = r.x, y1 = r.y, x2 = r.x + r.w, y2 = r.y + r.h;
+    for (const p of pkgs.values()) {
+      const [fw] = labelSize(p, 22);
+      const size = clamp(Math.min(22, 22 * (p.w * z - 20) / fw, p.h * z / 2.6), 11, 22);
+      const [lw, lh] = labelSize(p, size);
+      const hw = (lw / 2 + 8) / z, hh = (lh / 2 + 2) / z;
+      const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+      x1 = Math.min(x1, cx - hw); y1 = Math.min(y1, cy - hh);
+      x2 = Math.max(x2, cx + hw); y2 = Math.max(y2, cy + hh);
+    }
+    return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
   }
 
   // showCode flies to a card close enough to read its code. A long card is

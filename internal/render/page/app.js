@@ -1111,7 +1111,15 @@ async function startComments() {
   let saved = null;
   try { saved = localStorage.getItem("map-pr:chat"); } catch {}
   setChat(saved !== "closed");
-  route(); // show the comment parts of the current view, or open a #thread= link
+  if (location.hash.slice(1)) {
+    route(); // show the comment parts of the current view, or open a #thread= link
+  } else {
+    // The overview again, with the chat now open. A fly to fit would end the
+    // intro, so fit at once and start the intro again.
+    home({ fly: false });
+    map.fit(false);
+    map.playPaths();
+  }
   setInterval(() => { if (!document.hidden) loadThreads().catch(() => {}); }, 2500);
 }
 
